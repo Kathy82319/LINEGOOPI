@@ -4,6 +4,15 @@ const FINMIND_API_TOKEN = properties.getProperty('FINMIND_API_TOKEN');
 
 //【每日總開關】負責更新所有每日變動的市場數據、技術指標與籌碼動態。
 function runDailyUpdate() {
+  const today = new Date();
+  const dayOfWeek = today.getDay(); // 獲取今天是星期幾 (0=週日, 1=週一, ..., 6=週六)
+
+  // ★★★ 全新改造：加入「週末守衛」 ★★★
+  // 如果今天是週六 (6) 或 週日 (0)，就直接結束函式，不執行任何更新。
+  if (dayOfWeek === 6 || dayOfWeek === 0) {
+    Logger.log("🚀 [每日] 今天是週末，系統休息中，不執行更新流程。");
+    return; // 直接結束函式
+  }
   Logger.log("🚀 [每日] 開始執行高頻率更新流程...");
   
   // ★★★ 全新步驟 0: 更新大盤日誌 ★★★
@@ -26,6 +35,10 @@ function runDailyUpdate() {
   Logger.log("--> 步驟 4/5: 計算法人連買天數...");
   updateConsecutiveBuyDays();
 
+  // 順序 5: 【基本資料模組】：更新股票名稱、產業別
+  Logger.log("--> 步驟 5/5: 更新股票基本資料...");
+  updateStockInfoFromFinMind();
+
   // 最終步驟：在所有數據都更新完畢後，執行「動態條件警報」檢查
   Logger.log("--> 最終步驟: 執行「動態條件警報」檢查...");
   checkCustomAlerts();
@@ -38,19 +51,15 @@ function runWeeklyUpdate() {
   Logger.log("🚀 [每週] 開始執行中頻率更新流程...");
 
   // 步驟 1: 【股利相關模組】
-  Logger.log("--> 步驟 1/4: 更新股利與每股數據...");
+  Logger.log("--> 步驟 1/3: 更新股利與每股數據...");
   updateDividendModule_Definitive();
 
-  // 步驟 2: 【基本資料模組】：更新股票名稱、產業別
-  Logger.log("--> 步驟 2/4: 更新股票基本資料...");
-  updateStockInfoFromFinMind();
-
-  // 步驟 3: 【歷史本益比位階】：
-  Logger.log("--> 步驟 3/4: 更新歷史本益比位階...");
+  // 步驟 2: 【歷史本益比位階】：
+  Logger.log("--> 步驟 2/3: 更新歷史本益比位階...");
   updateHistoricalPERatio();
 
-  // 步驟 4: 【新聞情緒分析】：
-  Logger.log("--> 步驟 4/4: 更新新聞數量與 AI 情緒分數...");
+  // 步驟 3: 【新聞情緒分析】：
+  Logger.log("--> 步驟 3/3: 更新新聞數量與 AI 情緒分數...");
   updateNewsSentiment();
 
   Logger.log("✅ [每週] 中頻率更新流程執行完畢！");
