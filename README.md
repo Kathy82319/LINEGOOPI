@@ -30,16 +30,25 @@ function runDailyUpdate() {
 }
 
 //【每週總開關】負責更新每週發布的籌碼數據與不常變動的基本資料。
+//【每週總開關】負責更新每週發布的籌碼數據與不常變動的基本資料。
 function runWeeklyUpdate() {
   Logger.log("🚀 [每週] 開始執行中頻率更新流程...");
 
-  // 步驟 1: 【股利相關】：除息日、股利發放日、現金股利、股票股利、殖利率、股利發放率、填息天數、連續配息年數、在外流通股數、自由現金流、每股自由現金流、股東權益總額、每股營收、每股淨值
-  Logger.log("--> 步驟 1/2: 更新股利與每股數據...");
+  // 步驟 1: 【股利相關模組】
+  Logger.log("--> 步驟 1/4: 更新股利與每股數據...");
   updateDividendModule_Definitive();
 
   // 步驟 2: 【基本資料模組】：更新股票名稱、產業別
-  Logger.log("--> 步驟 2/2: 更新股票基本資料...");
+  Logger.log("--> 步驟 2/4: 更新股票基本資料...");
   updateStockInfoFromFinMind();
+
+  // 步驟 3: 【歷史本益比位階】：
+  Logger.log("--> 步驟 3/4: 更新歷史本益比位階...");
+  updateHistoricalPERatio();
+
+  // 步驟 4: 【新聞情緒分析】：
+  Logger.log("--> 步驟 4/4: 更新新聞數量與 AI 情緒分數...");
+  updateNewsSentiment();
 
   Logger.log("✅ [每週] 中頻率更新流程執行完畢！");
 }
@@ -1151,6 +1160,205 @@ function fetchAndCalculateTechIndicators(ticker) {
   }
 }
 
+//歷史本益比位階分析模組
+function updateHistoricalPERatio() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('風控報表');
+  if (!sheet) {
+    Logger.log('❌ 找不到名為 "風控報表" 的工作表');
+    return;
+  }
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  
+  // 找到需要讀取和寫入的欄位
+  const tickerCol = headers.indexOf('股票代碼');
+  const currentPECol = headers.indexOf('本益比');
+  const pePercentileCol = headers.indexOf('歷史本益比位階(%)');
+
+  if (pePercentileCol === -1) {
+    Logger.log('❌ 找不到 "歷史本益比位階(%)" 欄位，無法更新。');
+    return;
+  }
+
+  // 主迴圈：逐一處理每一支股票
+  for (let i = 1; i < data.length; i++) {
+    const ticker = data[i][tickerCol];
+    const currentPE = parseFloat(data[i][currentPECol]); // 讀取目前的本益比
+
+    // 忽略沒有股票代碼或目前本益比無法計算的股票
+    if (!ticker || isNaN(currentPE)) {
+      data[i][pePercentileCol] = '資料不足';
+      continue;
+    }
+    
+    // 呼叫輔助函式，抓取過去三年的歷史本益比數據
+    const historicalPEs = fetchHistoricalPER(ticker, 3);
+    
+    if (historicalPEs && historicalPEs.length > 0) {
+      // 計算百分位
+      let countBelow = 0;
+      for (const pe of historicalPEs) {
+        if (pe < currentPE) {
+          countBelow++;
+        }
+      }
+      const percentile = (countBelow / historicalPEs.length) * 100;
+      data[i][pePercentileCol] = percentile.toFixed(1) + '%'; // 寫入計算結果，保留一位小數
+      Logger.log(`✅ ${ticker}: 目前本益比 ${currentPE}, 歷史位階 ${percentile.toFixed(1)}%`);
+    } else {
+      data[i][pePercentileCol] = '無歷史資料';
+      Logger.log(`-> ${ticker}: 找不到歷史本益比資料。`);
+    }
+  }
+
+  sheet.getDataRange().setValues(data);
+  Logger.log('✅ 所有股票的歷史本益比位階更新完畢！');
+}
+
+//輔助函式：從 FinMind 獲取指定股票的歷史本益比數據 
+function fetchHistoricalPER(ticker, years) {
+  const dataset = "TaiwanStockPER";
+  
+  const startDate = new Date();
+  startDate.setFullYear(startDate.getFullYear() - years);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      // 我們只需要 PER (本益比) 這個欄位的數值
+      return json.data.map(item => item.PER);
+    } else {
+      return null;
+    }
+  } catch (e) {
+    Logger.log(`⚠️ 呼叫 FinMind 歷史本益比 API 時發生錯誤 (股票: ${ticker}): ${e}`);
+    return null;
+  }
+}
+
+//主函式：更新所有股票的近期新聞數量與 AI 情緒分數 ★
+function updateNewsSentiment() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('風控報表');
+  if (!sheet) {
+    Logger.log('❌ 找不到名為 "風控報表" 的工作表');
+    return;
+  }
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+
+  // 找到需要讀取和寫入的欄位
+  const tickerCol = headers.indexOf('股票代碼');
+  const nameCol = headers.indexOf('股票名稱');
+  const newsCountCol = headers.indexOf('近七日新聞則數');
+  const sentimentScoreCol = headers.indexOf('近期新聞情緒分數');
+
+  if (newsCountCol === -1 || sentimentScoreCol === -1) {
+    Logger.log('❌ 找不到 "近七日新聞則數" 或 "近期新聞情緒分數" 欄位，無法更新。');
+    return;
+  }
+
+  // 主迴圈：逐一處理每一支股票
+  for (let i = 1; i < data.length; i++) {
+    const ticker = data[i][tickerCol];
+    const name = data[i][nameCol];
+    if (!ticker) continue;
+
+    // 步驟 1: 呼叫輔助函式，抓取過去七天的新聞標題
+    const newsHeadlines = fetchFinMindNews(ticker, 7);
+
+    if (newsHeadlines && newsHeadlines.length > 0) {
+      // 步驟 2: 更新新聞則數
+      data[i][newsCountCol] = newsHeadlines.length;
+      Logger.log(`✅ ${name}: 找到 ${newsHeadlines.length} 則新聞，準備進行 AI 情緒分析...`);
+
+      // 步驟 3: 呼叫另一個輔助函式，將新聞標題打包送給 AI 進行分析
+      const sentimentScore = analyzeSentimentWithAI(name, ticker, newsHeadlines);
+      data[i][sentimentScoreCol] = sentimentScore;
+      Logger.log(`-> AI 分析完成，情緒分數為: ${sentimentScore}`);
+
+    } else {
+      // 如果找不到新聞
+      data[i][newsCountCol] = 0;
+      data[i][sentimentScoreCol] = '無新聞';
+      Logger.log(`-> ${name}: 找不到近期新聞。`);
+    }
+  }
+
+  sheet.getDataRange().setValues(data);
+  Logger.log('✅ 所有股票的新聞情緒分析更新完畢！');
+}
+
+
+// 輔助函式 #1：從 FinMind 獲取指定股票的歷史新聞標題 ★
+function fetchFinMindNews(ticker, days) {
+  const dataset = "TaiwanStockNews";
+  
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      // 我們只需要新聞的 "title" (標題)
+      return json.data.map(item => item.title);
+    } else {
+      return null;
+    }
+  } catch (e) {
+    Logger.log(`⚠️ 呼叫 FinMind 新聞 API 時發生錯誤 (股票: ${ticker}): ${e}`);
+    return null;
+  }
+}
+
+//輔助函式 #2：將新聞標題送交 OpenAI 進行情緒分析 ★
+function analyzeSentimentWithAI(name, ticker, headlines) {
+  const properties = PropertiesService.getScriptProperties();
+  const openAIApiKey = properties.getProperty('OPENAI_API_KEY');
+  if (!openAIApiKey) return "錯誤：未設定 OpenAI API Key";
+
+  const allHeadlines = headlines.join('\n'); // 將所有標題合併成一個大字串
+
+  const prompt = `
+    你是一位專門分析財經新聞情緒的量化分析師。你的任務是讀取我提供的多則新聞標題，然後給出一個精準的、介於 -1.0 (極度負面) 到 +1.0 (極度正面) 之間的情緒分數。
+
+    分析規則：
+    - 完全負面或大利空消息（如：營收衰退、財測下修、重大違約）應接近 -1.0。
+    - 完全正面或大利多消息（如：營收創歷史新高、接到大訂單、獲利超乎預期）應接近 +1.0。
+    - 中性、客觀、或多空消息混雜的新聞，應接近 0.0。
+    - 請只專注於新聞標題本身傳達的情緒，不要加入你自己的市場判斷。
+    - 你的回答「只能」是一個數字，不要有任何多餘的文字、解釋或開場白。
+
+    請分析以下關於 "${name} (${ticker})" 的新聞標題：
+    ---
+    ${allHeadlines}
+  `;
+  
+  // 我們直接使用之前寫好的 callOpenAI_forGAS 函式
+  const aiResponse = callOpenAI_forGAS(prompt, openAIApiKey);
+
+  // 嘗試將 AI 的回覆轉換為數字
+  const score = parseFloat(aiResponse);
+  if (!isNaN(score)) {
+    return score.toFixed(2); // 回傳保留兩位小數的數字
+  } else {
+    // 如果 AI 回傳的不是數字，就返回一個錯誤標記
+    Logger.log(`-> AI 回傳的格式非數字: ${aiResponse}`);
+    return "AI分析失敗";
+  }
+}
+
 //【每日風控報告模組】
 function generateDailyRiskReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1549,12 +1757,12 @@ function generateSingleStockReport(ticker) {
         '流動負債總計', '非流動負債總計', '股東權益總額', '負債比', '負債總額', 
         '資產總額', '營收 YoY', 'EPS YoY', '除息日', '股利發放日', 
         '現金股利', '股票股利', '殖利率', '股利發放率', '股利來源', 
-        '連續配息年數', '每股營收', '自由現金流', 
-        '每股自由現金流', '每股淨值', '在外流通股數', 'EPS (近四季)', 
+        '連續配息年數', '每股營收', 
+        '每股淨值', '在外流通股數', 'EPS (近四季)', 
         '營業毛利 (近四季)', '營業收入 (近四季)', '稅後淨利 (近四季)', 
         '外資買超張數', '投信買超張數', '融資餘額', '券賣餘額', 
-        '外資連買天數', '投信連買天數', '大戶集中度', 
-        '近10日均量', '均線排列', '是否突破前高', '是否跌破支撐'
+        '外資連買天數', '投信連買天數', '歷史本益比位階(%)',
+        '近10日均量', '均線排列', '是否突破前高', '是否跌破支撐','近七日新聞則數', '近期新聞情緒分數'
     ];
 
     relevantHeaders.forEach(header => {
