@@ -6,7 +6,7 @@ const FINMIND_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAy
 function runDailyUpdate() {
   Logger.log("🚀 [每日] 開始執行高頻率更新流程...");
   
-  // 順序 1: 【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額 (來自 updateMarketData)
+  // 順序 1: 【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額 
   Logger.log("--> 步驟 1/5: 更新市場數據 (法人、融資券)...");
   updateMarketData();
   
@@ -29,7 +29,6 @@ function runDailyUpdate() {
   Logger.log("✅ [每日] 高頻率更新流程執行完畢！");
 }
 
-//【每週總開關】負責更新每週發布的籌碼數據與不常變動的基本資料。
 //【每週總開關】負責更新每週發布的籌碼數據與不常變動的基本資料。
 function runWeeklyUpdate() {
   Logger.log("🚀 [每週] 開始執行中頻率更新流程...");
@@ -159,31 +158,30 @@ function updateStockPriceAndVolumeFromFinMind() {
   const priceCol = headers.indexOf('今日股價');
   const volumeCol = headers.indexOf('今日成交量');
   
-  // 計算本益比所需欄位
+  // 原料
+  const sharesOutstandingCol = headers.indexOf('在外流通股數');
+  const revenueCol = headers.indexOf('營業收入');
   const ttmEpsCol = headers.indexOf('EPS (近四季)');
-  const peRatioCol = headers.indexOf('本益比');
-  
-  // ★★★ 全新改造：找到計算「股價淨值比」所需的所有原料 ★★★
-  const equityCol = headers.indexOf('股東權益總額');         // 原料1: 股東權益總額 (來自季報表)
-  const sharesOutstandingCol = headers.indexOf('在外流通股數'); // 原料2: 在外流通股數 (來自週報表)
-  const bvpsCol = headers.indexOf('每股淨值');                 // 產出1: 每股淨值
-  const pbRatioCol = headers.indexOf('股價淨值比');             // 最終產出2: 股價淨值比
+  const equityCol = headers.indexOf('股東權益總額');
 
-  // 計算股價營收比所需欄位
+  // 產出
   const spsCol = headers.indexOf('每股營收');
+  const bvpsCol = headers.indexOf('每股淨值');
+  
+  // 最終估值
+  const peRatioCol = headers.indexOf('本益比');
   const psRatioCol = headers.indexOf('股價營收比');
+  const pbRatioCol = headers.indexOf('股價淨值比');
   
   if (tickerCol === -1 || priceCol === -1 || volumeCol === -1) {
     Logger.log('❌ 找不到基礎欄位：「股票代碼」、「今日股價」或「今日成交量」。');
     return;
   }
 
-  // --- 主迴圈：逐一處理股票 ---
   for (let i = 1; i < data.length; i++) {
     const ticker = data[i][tickerCol];
     if (!ticker) continue;
 
-    // 抓取股價的邏輯不變
     let latestStockData = null;
     let tryDate = new Date();
     for (let j = 0; j < 5; j++) {
@@ -203,9 +201,30 @@ function updateStockPriceAndVolumeFromFinMind() {
       data[i][priceCol] = price;
       data[i][volumeCol] = volume;
 
-      // --- 進行所有估值計算 ---
+      const shares = data[i][sharesOutstandingCol];
+      let sps = 0; // Sales Per Share (每股營收)
+      let bvps = 0; // Book Value Per Share (每股淨值)
+      
+      if (spsCol !== -1 && revenueCol !== -1 && shares && !isNaN(shares) && shares !== 0) {
+        const revenue = data[i][revenueCol];
+        if (revenue && !isNaN(revenue)) {
+          sps = revenue / shares;
+          data[i][spsCol] = sps.toFixed(2);
+        } else {
+          data[i][spsCol] = '無法計算';
+        }
+      }
+      
+      if (bvpsCol !== -1 && equityCol !== -1 && shares && !isNaN(shares) && shares !== 0) {
+        const equity = data[i][equityCol];
+        if (equity && !isNaN(equity)) {
+          bvps = equity / shares;
+          data[i][bvpsCol] = bvps.toFixed(2);
+        } else {
+          data[i][bvpsCol] = '無法計算';
+        }
+      }
 
-      // 計算本益比 (P/E Ratio)
       if (peRatioCol !== -1 && ttmEpsCol !== -1) {
         const ttmEps = data[i][ttmEpsCol];
         if (price > 0 && ttmEps && !isNaN(ttmEps) && ttmEps > 0) {
@@ -215,36 +234,16 @@ function updateStockPriceAndVolumeFromFinMind() {
         }
       }
 
-      // ★★★ 全新改造：獨立完成「每股淨值」與「股價淨值比」的計算 ★★★
-      if (bvpsCol !== -1 && pbRatioCol !== -1 && equityCol !== -1 && sharesOutstandingCol !== -1) {
-        const equity = data[i][equityCol]; // 直接讀取季報更新的「股東權益總額」
-        const shares = data[i][sharesOutstandingCol]; // 直接讀取週報更新的「在外流通股數」
-        let bvps = 0; // Book Value Per Share (每股淨值)
-
-        // 步驟 1: 在這裡獨立計算「每股淨值」
-        if (equity && !isNaN(equity) && shares && !isNaN(shares) && shares !== 0) {
-          bvps = equity / shares;
-          data[i][bvpsCol] = bvps.toFixed(2); // 將算出來的每股淨值寫回表格
-        } else {
-          data[i][bvpsCol] = '無法計算';
-        }
-
-        // 步驟 2: 接著用剛算出來的「每股淨值」來計算「股價淨值比」
-        if (price > 0 && bvps > 0) {
-          data[i][pbRatioCol] = (price / bvps).toFixed(2);
-        } else {
-          data[i][pbRatioCol] = '無法計算';
-        }
+      if (pbRatioCol !== -1 && bvps > 0) {
+        data[i][pbRatioCol] = (price / bvps).toFixed(2);
+      } else if (pbRatioCol !== -1) {
+        data[i][pbRatioCol] = '無法計算';
       }
 
-      // 計算股價營收比 (P/S Ratio)
-      if (psRatioCol !== -1 && spsCol !== -1) {
-        const sps = data[i][spsCol];
-        if (price > 0 && sps && !isNaN(sps) && sps > 0) {
-          data[i][psRatioCol] = (price / sps).toFixed(2);
-        } else {
-          data[i][psRatioCol] = '無法計算';
-        }
+      if (psRatioCol !== -1 && sps > 0) {
+        data[i][psRatioCol] = (price / sps).toFixed(2);
+      } else if (psRatioCol !== -1) {
+        data[i][psRatioCol] = '無法計算';
       }
       
     } else { 
@@ -252,7 +251,6 @@ function updateStockPriceAndVolumeFromFinMind() {
     }
   }
 
-  // --- 批次寫入 ---
   sheet.getDataRange().setValues(data);
   Logger.log('✅ 所有股票的股價、成交量與估值指標更新完成！');
 }
@@ -444,7 +442,6 @@ function updateDividendModule_Definitive() {
     '股票股利': 'stock_dividend',
     '股利發放日': 'payment_date',
     '在外流通股數': 'shares_outstanding', // 這是本函式最重要的產出之一
-    '自由現金流': 'free_cash_flow',       // 雖然API沒資料，但邏輯保留
     '股利來源': 'dividend_source'
   };
   
@@ -1861,4 +1858,6 @@ function replyToLINE(replyToken, messageText) {
   const response = UrlFetchApp.fetch(url, options);
   Logger.log("LINE Reply API 回應: " + response.getContentText());
 }
+
+
 
