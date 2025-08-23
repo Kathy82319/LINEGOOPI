@@ -1,11 +1,15 @@
 //【全域設定-金鑰】
-const FINMIND_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOC0xNyAwMTo1MjoyOCIsInVzZXJfaWQiOiJjYXRoODIzMTlAZ21haWwuY29tIiwiaXAiOiIxMTQuNDYuMTMzLjEzIn0.5id3AZqo5220p858xB6WKP6RTvc_G3D7R5N-wu8frA4";
-
+const properties = PropertiesService.getScriptProperties();
+const FINMIND_API_TOKEN = properties.getProperty('FINMIND_API_TOKEN');
 
 //【每日總開關】負責更新所有每日變動的市場數據、技術指標與籌碼動態。
 function runDailyUpdate() {
   Logger.log("🚀 [每日] 開始執行高頻率更新流程...");
   
+  // ★★★ 全新步驟 0: 更新大盤日誌 ★★★
+  Logger.log("--> 步驟 0/5: 更新大盤日誌...");
+  updateTaiexLog();
+
   // 順序 1: 【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額 
   Logger.log("--> 步驟 1/5: 更新市場數據 (法人、融資券)...");
   updateMarketData();
@@ -293,7 +297,6 @@ function updateFinancials() {
     return;
   }
 
-  // 我們的財報地圖 (colMapping) 不需要改變，因為新的抓取函式會把它用得很好
   const colMapping = {
     '營業收入': ['Revenue'], '營業毛利': ['GrossProfit'], '營業利益': ['OperatingIncome'],
     '稅後淨利': ['IncomeAfterTaxes', 'EquityAttributableToOwnersOfParent'], '營業費用': ['OperatingExpenses'],
@@ -318,10 +321,11 @@ function updateFinancials() {
   const epsYoYCol = headers.indexOf('EPS YoY');
 
   for (let i = 1; i < data.length; i++) {
-    const ticker = data[i][tickerCol];
+    // ★★★ 關鍵修正：在讀取股票代碼後，立刻使用 .trim() 去除隱形空格 ★★★
+    const ticker = data[i][tickerCol] ? String(data[i][tickerCol]).trim() : null;
+    
     if (!ticker) continue;
 
-    // ★★★ 呼叫我們全新的、會翻箱倒櫃的輔助函式 ★★★
     const historicalData = fetchAndParseMultiSourceFinancials(ticker, colMapping);
 
     if (historicalData && historicalData.latest) {
@@ -695,7 +699,7 @@ function getPreviousDayClosePrice_Definitive(ticker, dateStr) {
 
 //偵錯小工具：檢查指定股票的最新財報中，到底有哪些可用的會計項目
 function checkLatestData() {
-  const ticker = "2330"; // 👈 在這裡修改你想檢查的股票代碼
+  const ticker = "6239"; // 👈 在這裡修改你想檢查的股票代碼
 
   Logger.log(`🔍 開始檢查股票 ${ticker} 的最新財報資料...`);
 
@@ -871,45 +875,53 @@ function updateMarketData() {
   const data = sheet.getDataRange().getValues();
   const headers = data[0];
   
-  // 找到我們需要更新的欄位索引
+  // 找到所有需要更新的籌碼欄位索引
   const tickerCol = headers.indexOf('股票代碼');
+  const foreignBuyCol = headers.indexOf('外資買超張數');
+  const trustBuyCol = headers.indexOf('投信買超張數');
   const marginBalanceCol = headers.indexOf('融資餘額');
   const shortBalanceCol = headers.indexOf('券賣餘額');
   
-  // 我們不再需要借券和當日券賣，因為 FinMind 的這個 API 沒有直接提供
-  // 如果未來有需要，可以再找尋其他 FinMind 的資料集來補充
-
-  let updatedCount = 0; // 用來計算更新了多少筆資料
+  let updatedCount = 0;
 
   // 主迴圈：逐一處理每一支股票
   for (let i = 1; i < data.length; i++) {
-    const ticker = data[i][tickerCol];
-    if (!ticker) continue; // 如果沒有股票代碼，就跳過
+    const ticker = data[i][tickerCol] ? String(data[i][tickerCol]).trim() : null;
+    if (!ticker) continue;
 
-    // 為當前股票呼叫我們新的輔助函式
-    const marginData = fetchFinMindMarginData(ticker);
-    
-    // 如果成功取回資料...
-    if (marginData) {
-      // 就把資料寫入我們記憶體中的 data 陣列
-      if (marginBalanceCol !== -1) {
-        data[i][marginBalanceCol] = marginData.margin_balance;
-      }
-      if (shortBalanceCol !== -1) {
-        data[i][shortBalanceCol] = marginData.short_balance;
-      }
-      updatedCount++;
+    let updated = false;
+
+    // --- 步驟 1: 獲取三大法人買賣超 ---
+    const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
+    if (institutionalData) {
+      if (foreignBuyCol !== -1) data[i][foreignBuyCol] = institutionalData.foreign_buy_sell;
+      if (trustBuyCol !== -1) data[i][trustBuyCol] = institutionalData.trust_buy_sell;
+      updated = true;
     } else {
-      Logger.log(`-> ${ticker}: 在 FinMind 中找不到融資融券資料。`);
+      Logger.log(`-> ${ticker}: 在 FinMind 中找不到「三大法人」資料。`);
+    }
+
+    // --- 步驟 2: 獲取融資融券餘額 ---
+    const marginData = fetchFinMindMarginData(ticker);
+    if (marginData) {
+      if (marginBalanceCol !== -1) data[i][marginBalanceCol] = marginData.margin_balance;
+      if (shortBalanceCol !== -1) data[i][shortBalanceCol] = marginData.short_balance;
+      updated = true;
+    } else {
+      Logger.log(`-> ${ticker}: 在 FinMind 中找不到「融資融券餘額」資料。`);
+    }
+    
+    if (updated) {
+      updatedCount++;
     }
   }
 
   // 將所有更新一次性寫回 Google Sheet
   sheet.getDataRange().setValues(data);
-  Logger.log(`✅ 市場籌碼數據更新完成！總共從 FinMind 更新了 ${updatedCount} 支股票的資料。`);
+  Logger.log(`✅ 市場籌碼數據更新完成！總共處理了 ${updatedCount} 支股票的資料。`);
 }
 
-//【籌碼面輔助函式】
+//【融資融券輔助函式】
 function fetchFinMindMarginData(ticker) {
   // FinMind 的融資融券資料集名稱是 "TaiwanStockMarginPurchaseShortSale"
   const dataset = "TaiwanStockMarginPurchaseShortSale";
@@ -938,6 +950,35 @@ function fetchFinMindMarginData(ticker) {
     }
   } catch (e) {
     Logger.log(`⚠️ 呼叫 FinMind 融資融券 API 時發生錯誤 (股票: ${ticker}): ${e}`);
+    return null;
+  }
+}
+
+//輔助函式：獲取三大法人買賣超
+function fetchFinMindInstitutionalInvestors(ticker) {
+  const dataset = "TaiwanStockInstitutionalInvestorsBuySell";
+  
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 7);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      const latestData = json.data[json.data.length - 1];
+      return {
+        foreign_buy_sell: latestData.foreign_investor_buy - latestData.foreign_investor_sell,
+        trust_buy_sell: latestData.investment_trust_buy - latestData.investment_trust_sell
+      };
+    } else {
+      return null;
+    }
+  } catch (e) {
+    Logger.log(`⚠️ 呼叫 FinMind 三大法人 API 時發生錯誤 (股票: ${ticker}): ${e}`);
     return null;
   }
 }
@@ -1858,6 +1899,162 @@ function replyToLINE(replyToken, messageText) {
   const response = UrlFetchApp.fetch(url, options);
   Logger.log("LINE Reply API 回應: " + response.getContentText());
 }
+
+//每日大盤日誌 
+function updateTaiexLog() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = "大盤日誌";
+  let sheet = ss.getSheetByName(sheetName);
+
+  // 步驟 1: 如果工作表不存在，就建立它並加入標題
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName, 0); // 插入到最前面
+    const headers = ["日期", "收盤指數", "漲跌點數", "漲跌幅(%)", "成交金額(億)"];
+    sheet.appendRow(headers);
+    Logger.log(`✅ 已建立新的工作表: "${sheetName}"`);
+  }
+
+  // 步驟 2: 呼叫輔助函式，從 FinMind 獲取最新的大盤數據
+  const taiexData = fetchLatestTaiexData();
+
+  if (taiexData) {
+    const todayStr = Utilities.formatDate(new Date(taiexData.date), "Asia/Taipei", "yyyy-MM-dd");
+    
+    // 檢查今天是否已經記錄過，避免重複寫入
+    const lastRowData = sheet.getLastRow() > 1 ? sheet.getRange("A" + sheet.getLastRow()).getValue() : null;
+    if (lastRowData && Utilities.formatDate(new Date(lastRowData), "Asia/Taipei", "yyyy-MM-dd") === todayStr) {
+        Logger.log("ℹ️ 今日大盤數據已記錄，跳過更新。");
+        return;
+    }
+
+    // 步驟 3: 將新數據寫入到「大盤日誌」的下一列
+    const newRow = [
+      todayStr,
+      taiexData.close,
+      taiexData.change,
+      taiexData.percentChange,
+      taiexData.tradingValue
+    ];
+    sheet.appendRow(newRow);
+    Logger.log(`✅ 已將 ${todayStr} 的大盤數據寫入 "${sheetName}"`);
+  } else {
+    Logger.log("❌ 無法獲取今日大盤數據。");
+  }
+}
+
+//輔助函式：獲取最新的加權指數數據
+function fetchLatestTaiexData() {
+  const dataset = "TaiwanStockPrice";
+  const ticker = "TAIEX"; 
+  
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 7);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      const latestData = json.data[json.data.length - 1];
+      
+      const close = latestData.close;
+      const change = latestData.spread;
+      const tradingValue = latestData.Trading_money; // ★ 關鍵修正 #1：使用正確的欄位名稱
+
+      // ★ 關鍵修正 #2：自己動手計算「漲跌幅(%)」 ★
+      // 公式：漲跌點數 / (今日收盤 - 漲跌點數) * 100
+      let percentChange = 0;
+      const previousClose = close - change; // 計算出昨日收盤價
+      if (previousClose !== 0) {
+        percentChange = (change / previousClose) * 100;
+      }
+
+      return {
+        date: latestData.date,
+        close: close,
+        change: change,
+        percentChange: percentChange.toFixed(2), // 回傳我們自己算好的漲跌幅
+        tradingValue: (tradingValue / 100000000).toFixed(2) // 將單位從「元」換算成「億元」
+      };
+    } else {
+      return null;
+    }
+  } catch (e) {
+    Logger.log(`⚠️ 呼叫 FinMind 加權指數 API 時發生錯誤: ${e}`);
+    return null;
+  }
+}
+
+/**
+ * ★★★ 最終偵錯工具：檢查 FinMind 財報中的「每股盈餘」原始數據 ★★★
+ */
+function debugEpsData() {
+  // ▼▼▼ 在這裡修改你想檢查的股票代碼 ▼▼▼
+  const ticker = "2330"; 
+  // ▲▲▲ 你可以換成任何一支你的持股代碼 ▲▲▲
+
+  Logger.log(`🔍 開始檢查股票 ${ticker} 的 FinMind 財報「原始資料」...`);
+
+  const colMapping = {
+    '每股盈餘': ['EPS', 'BasicEarningsPerShare']
+  };
+
+  // 我們直接呼叫現有的、最核心的資料抓取函式
+  const historicalData = fetchAndParseMultiSourceFinancials(ticker, colMapping);
+
+  if (historicalData && historicalData.latest) {
+    Logger.log("✅ 成功獲取並解析最新一季的財報！");
+    Logger.log("★★★ 這是程式解析後，找到的「每股盈餘」資料：★★★");
+    Logger.log(JSON.stringify(historicalData.latest, null, 2));
+
+    // 現在，我們來看看最原始的資料長什麼樣子
+    Logger.log("\n★★★ 為了比對，正在重新抓取一次最原始的綜合損益表資料... ★★★");
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockFinancialStatements&data_id=${ticker}&start_date=2024-01-01&token=${FINMIND_API_TOKEN}`;
+    try {
+        const res = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+        const json = JSON.parse(res.getContentText());
+        if (json.data && json.data.length > 0) {
+            const latestDate = json.data.reduce((max, p) => (p.date > max ? p.date : max), json.data[0].date);
+            const latestData = json.data.filter(item => item.date === latestDate);
+            Logger.log(`在 ${latestDate} 的財報中，所有可用的「type」欄位如下：`);
+            Logger.log(JSON.stringify(latestData.map(item => item.type)));
+        }
+    } catch(e) {
+        Logger.log("抓取原始資料時發生錯誤: " + e);
+    }
+
+  } else {
+    Logger.log(`❌ 呼叫 fetchAndParseMultiSourceFinancials 後，無法獲取 ${ticker} 的財報資料。`);
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
