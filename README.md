@@ -1735,50 +1735,43 @@ function callOpenAI_forGAS(prompt, apiKey) {
 // =======================================================================
 //Webhook 主入口：這是 Google 執行 Web App 的標準進入點。
 function doPost(e) {
-  // 步驟 1: 驗證請求是否來自 LINE
   if (e === undefined || e.postData === undefined || e.postData.contents === undefined) {
-    Logger.log("收到了無效的請求，已忽略。");
     return ContentService.createTextOutput("Invalid request").setMimeType(ContentService.MimeType.TEXT);
   }
-
   const events = JSON.parse(e.postData.contents).events;
-
-  // 步驟 2: 處理收到的每個事件
   events.forEach(function(event) {
     if (event.type === "message" && event.message.type === "text") {
       const userMessage = event.message.text;
       const replyToken = event.replyToken;
-
-      // 步驟 3: 判斷使用者意圖並回應
-      handleTextMessage(userMessage, replyToken);
+      const userId = event.source.userId; // ★ 關鍵：取得使用者的 ID
+      handleTextMessage(userMessage, replyToken, userId);
     }
   });
-
-  // 步驟 4: 回傳一個成功的 HTTP 200 狀態給 LINE，表示已收到
   return ContentService.createTextOutput(JSON.stringify({'status':'ok'})).setMimeType(ContentService.MimeType.JSON);
 }
 
-//處理文字訊息的核心
-function handleTextMessage(message, replyToken) {
-  let replyText = "";
 
-  // 使用正規表示式來解析指令，這可以忽略各種奇怪的空白字元
-  // /分析\s*(\w+)/ 的意思是：找到「分析」這兩個字，後面跟著零個或多個空白(\s*)，然後捕獲接下來的一串數字或英文字母(\w+)
+//處理文字訊息的核心
+function handleTextMessage(message, replyToken, userId) {
   const match = message.trim().match(/分析\s*([\w\d]+)/);
 
   if (match) {
-    // 如果成功匹配，match[1] 就會是我們想要的股票代碼
     const ticker = match[1];
-    Logger.log(`接收到分析指令，成功解析出目標: ${ticker}`);
-    replyText = generateSingleStockReport(ticker);
+    Logger.log(`接收到分析指令，目標: ${ticker}`);
     
+    // ★ 步驟 1: 立即回覆 (Reply)，告知使用者已收到請求
+    replyToLINE(replyToken, `收到請求，正在為您深度分析「${ticker}」，請稍候...`);
+    
+    // ★ 步驟 2: 呼叫 AI 進行耗時的分析
+    const reportText = generateSingleStockReport(ticker);
+    
+    // ★ 步驟 3: 分析完成後，用 Push API 將完整報告推送給使用者
+    pushToLINEforGAS(reportText, userId);
+
   } else {
-    // 如果不符合 "分析 [代碼]" 的格式，就回覆預設訊息
-    replyText = "您好！這是一個股票分析助理。\n\n如需查詢個股資訊，請輸入：「分析 [股票代碼]」，例如：「分析 2330」。";
+    // 如果不是分析指令，就用 Reply 回覆預設訊息
+    replyToLINE(replyToken, "您好！這是一個股票分析助理。\n\n如需查詢個股資訊，請輸入：「分析 [股票代碼]」，例如：「分析 2330」。");
   }
-  
-  // 將最終的文字回覆給使用者
-  replyToLINE(replyToken, replyText);
 }
 
 
@@ -1865,50 +1858,61 @@ function replyToLINE(replyToken, messageText) {
   const url = 'https://api.line.me/v2/bot/message/reply';
   const properties = PropertiesService.getScriptProperties();
   const lineToken = properties.getProperty('LINE_CHANNEL_TOKEN');
-  
-  const MAX_LENGTH = 4800; // LINE 單則訊息的安全長度上限
-  let messages = [];
-
-  if (messageText.length > MAX_LENGTH) {
-    // 如果訊息太長，就進行拆分
-    Logger.log("訊息過長，開始進行自動拆分...");
-    let tempMessage = messageText;
-    while (tempMessage.length > 0) {
-      let chunk = tempMessage.substring(0, MAX_LENGTH);
-      messages.push({
-        type: 'text',
-        text: chunk
-      });
-      tempMessage = tempMessage.substring(MAX_LENGTH);
-    }
-  } else {
-    // 如果訊息長度正常，就直接發送
-    messages.push({
-      type: 'text',
-      text: messageText
-    });
-  }
-
-  // LINE 的 Reply API 一次最多可以傳送 5 則訊息
-  if (messages.length > 5) {
-      messages = messages.slice(0, 5); // 做個保護，避免超過上限
-  }
-
   const payload = {
     replyToken: replyToken,
-    messages: messages // 將單一訊息物件，換成訊息物件的陣列
+    messages: [{ type: 'text', text: messageText }]
   };
-
   const options = {
     method: 'post',
     contentType: 'application/json',
     headers: { 'Authorization': 'Bearer ' + lineToken },
+    payload: JSON.stringify(payload)
+  };
+  UrlFetchApp.fetch(url, options);
+}
+
+
+/**
+ * ★ 升級版：專門用於「推送長訊息」的 Push 函式 (已內建拆分功能) ★
+ */
+function pushToLINEforGAS(messageText, userId) {
+  const url = "https://api.line.me/v2/bot/message/push";
+  const properties = PropertiesService.getScriptProperties();
+  const lineToken = properties.getProperty('LINE_CHANNEL_TOKEN');
+  
+  const MAX_LENGTH = 4800;
+  let messages = [];
+
+  if (messageText.length > MAX_LENGTH) {
+    Logger.log("訊息過長，開始進行 Push 拆分...");
+    let tempMessage = messageText;
+    while (tempMessage.length > 0) {
+      let chunk = tempMessage.substring(0, MAX_LENGTH);
+      messages.push({ type: 'text', text: chunk });
+      tempMessage = tempMessage.substring(MAX_LENGTH);
+    }
+  } else {
+    messages.push({ type: 'text', text: messageText });
+  }
+  
+  if (messages.length > 5) {
+      messages = messages.slice(0, 5);
+  }
+
+  const payload = {
+    to: userId,
+    messages: messages
+  };
+  const options = {
+    method: 'post',
+    headers: { 'Authorization': 'Bearer ' + lineToken },
+    contentType: 'application/json',
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   };
-
+  
   const response = UrlFetchApp.fetch(url, options);
-  Logger.log("LINE Reply API 回應: " + response.getContentText());
+  Logger.log("LINE Push API 回應: " + response.getContentText());
 }
 
 //每日大盤日誌 
@@ -1996,44 +2000,6 @@ function fetchLatestTaiexData() {
   } catch (e) {
     Logger.log(`⚠️ 呼叫 FinMind 加權指數 API 時發生錯誤: ${e}`);
     return null;
-  }
-}
-
-/**
- * ★★★ 最終偵錯工具：檢查 FinMind 三大法人的「原始數據」★★★
- */
-function debugInstitutionalInvestorsData() {
-  // ▼▼▼ 在這裡修改你想檢查的股票代碼 ▼▼▼
-  const ticker = "2330"; 
-  // ▲▲▲ 你可以換成任何一支你的持股代碼 ▲▲▲
-
-  Logger.log(`🔍 開始檢查股票 ${ticker} 的 FinMind 三大法人「原始資料」...`);
-
-  const dataset = "TaiwanStockInstitutionalInvestorsBuySell";
-
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 7);
-  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
-
-  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
-
-  Logger.log(`查詢網址: ${url}`);
-  try {
-    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
-    const json = JSON.parse(response.getContentText());
-
-    if (json.data && json.data.length > 0) {
-      const latestData = json.data[json.data.length - 1];
-      Logger.log(`✅ 成功找到最新一筆資料 (日期: ${latestData.date})！`);
-      Logger.log("★★★ 這是 API 回傳的「原始資料」內容：★★★");
-      Logger.log(JSON.stringify(latestData, null, 2)); // 將原始物件完整印出
-
-    } else {
-      Logger.log(`❌ API 回應中沒有任何資料 (json.data 為空)。`);
-      Logger.log(`完整回應: ${response.getContentText()}`);
-    }
-  } catch (e) {
-    Logger.log(`❌ 查詢時發生程式錯誤: ${e}`);
   }
 }
 
