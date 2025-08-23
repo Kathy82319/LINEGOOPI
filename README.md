@@ -969,10 +969,21 @@ function fetchFinMindInstitutionalInvestors(ticker) {
     const json = JSON.parse(response.getContentText());
 
     if (json.data && json.data.length > 0) {
-      const latestData = json.data[json.data.length - 1];
+      // API 會回傳一個包含多個法人物件的陣列，我們只需要最新日期的資料
+      const latestDate = json.data[json.data.length - 1].date;
+      const latestDayData = json.data.filter(item => item.date === latestDate);
+
+      // 從最新日期的資料中，分別找出「外資」和「投信」
+      const foreignData = latestDayData.find(item => item.name === 'Foreign_Investor');
+      const trustData = latestDayData.find(item => item.name === 'Investment_Trust');
+
+      // 安全地計算買賣超，如果找不到該法人資料，就當作 0
+      const foreign_buy_sell = foreignData ? (foreignData.buy - foreignData.sell) / 1000 : 0;
+      const trust_buy_sell = trustData ? (trustData.buy - trustData.sell) / 1000 : 0;
+
       return {
-        foreign_buy_sell: latestData.foreign_investor_buy - latestData.foreign_investor_sell,
-        trust_buy_sell: latestData.investment_trust_buy - latestData.investment_trust_sell
+        foreign_buy_sell: foreign_buy_sell, // 單位已換算成「張」
+        trust_buy_sell: trust_buy_sell      // 單位已換算成「張」
       };
     } else {
       return null;
@@ -1989,48 +2000,42 @@ function fetchLatestTaiexData() {
 }
 
 /**
- * ★★★ 最終偵錯工具：檢查 FinMind 財報中的「每股盈餘」原始數據 ★★★
+ * ★★★ 最終偵錯工具：檢查 FinMind 三大法人的「原始數據」★★★
  */
-function debugEpsData() {
+function debugInstitutionalInvestorsData() {
   // ▼▼▼ 在這裡修改你想檢查的股票代碼 ▼▼▼
   const ticker = "2330"; 
   // ▲▲▲ 你可以換成任何一支你的持股代碼 ▲▲▲
 
-  Logger.log(`🔍 開始檢查股票 ${ticker} 的 FinMind 財報「原始資料」...`);
+  Logger.log(`🔍 開始檢查股票 ${ticker} 的 FinMind 三大法人「原始資料」...`);
 
-  const colMapping = {
-    '每股盈餘': ['EPS', 'BasicEarningsPerShare']
-  };
+  const dataset = "TaiwanStockInstitutionalInvestorsBuySell";
 
-  // 我們直接呼叫現有的、最核心的資料抓取函式
-  const historicalData = fetchAndParseMultiSourceFinancials(ticker, colMapping);
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 7);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
 
-  if (historicalData && historicalData.latest) {
-    Logger.log("✅ 成功獲取並解析最新一季的財報！");
-    Logger.log("★★★ 這是程式解析後，找到的「每股盈餘」資料：★★★");
-    Logger.log(JSON.stringify(historicalData.latest, null, 2));
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
 
-    // 現在，我們來看看最原始的資料長什麼樣子
-    Logger.log("\n★★★ 為了比對，正在重新抓取一次最原始的綜合損益表資料... ★★★");
-    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockFinancialStatements&data_id=${ticker}&start_date=2024-01-01&token=${FINMIND_API_TOKEN}`;
-    try {
-        const res = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
-        const json = JSON.parse(res.getContentText());
-        if (json.data && json.data.length > 0) {
-            const latestDate = json.data.reduce((max, p) => (p.date > max ? p.date : max), json.data[0].date);
-            const latestData = json.data.filter(item => item.date === latestDate);
-            Logger.log(`在 ${latestDate} 的財報中，所有可用的「type」欄位如下：`);
-            Logger.log(JSON.stringify(latestData.map(item => item.type)));
-        }
-    } catch(e) {
-        Logger.log("抓取原始資料時發生錯誤: " + e);
+  Logger.log(`查詢網址: ${url}`);
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      const latestData = json.data[json.data.length - 1];
+      Logger.log(`✅ 成功找到最新一筆資料 (日期: ${latestData.date})！`);
+      Logger.log("★★★ 這是 API 回傳的「原始資料」內容：★★★");
+      Logger.log(JSON.stringify(latestData, null, 2)); // 將原始物件完整印出
+
+    } else {
+      Logger.log(`❌ API 回應中沒有任何資料 (json.data 為空)。`);
+      Logger.log(`完整回應: ${response.getContentText()}`);
     }
-
-  } else {
-    Logger.log(`❌ 呼叫 fetchAndParseMultiSourceFinancials 後，無法獲取 ${ticker} 的財報資料。`);
+  } catch (e) {
+    Logger.log(`❌ 查詢時發生程式錯誤: ${e}`);
   }
 }
-
 
 
 
