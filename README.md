@@ -1582,54 +1582,65 @@ function checkCustomAlerts() {
 
 //智慧大腦：條件解析器
 function parseAndCheckConditions(conditionsString, headers, row) {
-  const conditions = conditionsString.split(';').map(c => c.trim());
-  let allConditionsMet = true;
-  let triggerDetails = "";
+  // 步驟 1: 先用 "OR" (||) 分隔，拆解成多個「條件組合」
+  const conditionGroups = conditionsString.split('||').map(g => g.trim());
 
-  for (const condition of conditions) {
-    // 使用正規表示式來解析 "欄位名稱 運算子 數值" 格式
-    const match = condition.match(/(.+?)(>=|<=|>|<|=)(.+)/);
-    if (!match) continue;
+  // 步驟 2: 遍歷每一個「條件組合」
+  for (const group of conditionGroups) {
+    const conditionsInGroup = group.split(';').map(c => c.trim());
+    let allConditionsInGroupMet = true; // 假設這個組合內的所有條件都滿足
+    let triggerDetails = ""; // 用來記錄這個組合的觸發細節
 
-    const fieldName = match[1].trim();
-    const operator = match[2].trim();
-    const targetValue = match[3].trim();
-    
-    const colIndex = headers.indexOf(fieldName);
-    if (colIndex === -1) {
-      allConditionsMet = false;
-      break; 
+    // 步驟 3: 在單一組合內，檢查每一個 "AND" 條件
+    for (const condition of conditionsInGroup) {
+      const match = condition.match(/(.+?)(>=|<=|>|<|=)(.+)/);
+      if (!match) continue;
+
+      const fieldName = match[1].trim();
+      const operator = match[2].trim();
+      const targetValue = match[3].trim();
+      
+      const colIndex = headers.indexOf(fieldName);
+      if (colIndex === -1) {
+        allConditionsInGroupMet = false;
+        break; 
+      }
+
+      let actualValue = row[colIndex];
+      let isMet = false;
+      const isTargetNumeric = !isNaN(parseFloat(targetValue));
+      
+      if (isTargetNumeric) {
+        actualValue = parseFloat(actualValue);
+        let numericTarget = parseFloat(targetValue);
+        if (operator === '>') isMet = actualValue > numericTarget;
+        else if (operator === '<') isMet = actualValue < numericTarget;
+        else if (operator === '>=') isMet = actualValue >= numericTarget;
+        else if (operator === '<=') isMet = actualValue <= numericTarget;
+        else if (operator === '=') isMet = actualValue == numericTarget;
+      } else {
+        if (operator === '=') isMet = String(actualValue).trim() == targetValue;
+      }
+      
+      // 將這個條件的觸發細節記錄下來
+      triggerDetails += `• ${fieldName}: ${actualValue} (條件: ${operator}${targetValue})\n`;
+      
+      if (!isMet) {
+        allConditionsInGroupMet = false; // 只要有一個條件不滿足...
+        break; // ...就立刻判定這個組合失敗，跳到下一個組合
+      }
     }
 
-    let actualValue = row[colIndex];
-    
-    // 進行比對
-    let isMet = false;
-    const isTargetNumeric = !isNaN(parseFloat(targetValue));
-    
-    if (isTargetNumeric) {
-      actualValue = parseFloat(actualValue);
-      let numericTarget = parseFloat(targetValue);
-      if (operator === '>') isMet = actualValue > numericTarget;
-      else if (operator === '<') isMet = actualValue < numericTarget;
-      else if (operator === '>=') isMet = actualValue >= numericTarget;
-      else if (operator === '<=') isMet = actualValue <= numericTarget;
-      else if (operator === '=') isMet = actualValue == numericTarget;
-    } else {
-      // 處理文字比對
-      if (operator === '=') isMet = String(actualValue).trim() == targetValue;
-    }
-    
-    // 記錄觸發的細節
-    triggerDetails += `• ${fieldName}: ${actualValue} (條件: ${operator}${targetValue})\n`;
-    
-    if (!isMet) {
-      allConditionsMet = false;
-      break; // 只要有一個條件不滿足，就立刻停止檢查
+    // 步驟 4: 如果在檢查完一個組合後，它內部的所有條件都還滿足...
+    if (allConditionsInGroupMet) {
+      // ...那麼就代表 "OR" 邏輯被觸發了！我們不需要再檢查後面的組合了。
+      Logger.log(`✅ 條件組合 "${group}" 被觸發！`);
+      return { isMet: true, details: triggerDetails }; // 立刻回報成功！
     }
   }
 
-  return { isMet: allConditionsMet, details: triggerDetails };
+  // 如果遍歷完所有的組合，都沒有任何一個被觸發，才回報失敗。
+  return { isMet: false, details: "" };
 }
 
 //輔助函式：呼叫 OpenAI API (GPT-4o) 並回傳分析結果
@@ -1850,41 +1861,4 @@ function replyToLINE(replyToken, messageText) {
   const response = UrlFetchApp.fetch(url, options);
   Logger.log("LINE Reply API 回應: " + response.getContentText());
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
