@@ -1383,8 +1383,8 @@ function fetchFinMindNews(ticker, days) {
 //輔助函式 #2：將新聞標題送交 OpenAI 進行情緒分析 ★
 function analyzeSentimentWithAI(name, ticker, headlines) {
   const properties = PropertiesService.getScriptProperties();
-  const openAIApiKey = properties.getProperty('OPENAI_API_KEY');
-  if (!openAIApiKey) return "錯誤：未設定 OpenAI API Key";
+  const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY'); // 讀取 Perplexity Key
+  if (!perplexityApiKey) return "錯誤：未設定 Perplexity API Key";
 
   const allHeadlines = headlines.join('\n'); // 將所有標題合併成一個大字串
 
@@ -1403,8 +1403,8 @@ function analyzeSentimentWithAI(name, ticker, headlines) {
     ${allHeadlines}
   `;
   
-  // 我們直接使用之前寫好的 callOpenAI_forGAS 函式
-  const aiResponse = callOpenAI_forGAS(prompt, openAIApiKey);
+  // 我們直接使用之前寫好的 callperplxity_forGAS 函式
+  const aiResponse = callPerplexity_forGAS(prompt, perplexityApiKey);
 
   // 嘗試將 AI 的回覆轉換為數字
   const score = parseFloat(aiResponse);
@@ -1701,18 +1701,16 @@ function parseAndCheckConditions(conditionsString, headers, row) {
   return { isMet: false, details: "" };
 }
 
-//輔助函式：呼叫 OpenAI API (GPT-4o) 並回傳分析結果
-function callOpenAI_forGAS(prompt, apiKey) {
-  const apiUrl = "https://api.openai.com/v1/chat/completions";
+//輔助函式：呼叫 Perplexity 並回傳分析結果
+function callPerplexity_forGAS(prompt, apiKey) {
+  const apiUrl = "https://api.perplexity.ai/chat/completions";
   
   const requestBody = {
-    model: "gpt-4o", // 指定使用最新的 GPT-4o 模型
-    messages: [{
-      role: "user",
-      content: prompt
-    }],
-    temperature: 0.7, // 讓 AI 的回覆稍微有點創意，但又不會太離譜
-    max_tokens: 500   // 限制回覆的長度，避免失控
+    model: "llama-3-sonar-large-32k-online", // Perplexity 推薦的、有網路連線能力的大模型
+    messages: [
+      { role: "system", content: "You are a helpful assistant." },
+      { role: "user", content: prompt }
+    ]
   };
 
   const params = {
@@ -1722,10 +1720,10 @@ function callOpenAI_forGAS(prompt, apiKey) {
       'Content-Type': 'application/json'
     },
     payload: JSON.stringify(requestBody),
-    muteHttpExceptions: true // 這很重要，這樣我們才能自己處理錯誤
+    muteHttpExceptions: true
   };
 
-  Logger.log("準備發送 OpenAI API 請求...");
+  Logger.log("準備發送 Perplexity API 請求...");
   const response = UrlFetchApp.fetch(apiUrl, params);
   const responseCode = response.getResponseCode();
   const responseBody = response.getContentText();
@@ -1734,8 +1732,8 @@ function callOpenAI_forGAS(prompt, apiKey) {
     const jsonResponse = JSON.parse(responseBody);
     return jsonResponse.choices[0].message.content.trim();
   } else {
-    Logger.log(`OpenAI API 請求失敗！回應代碼: ${responseCode}, 回應內容: ${responseBody}`);
-    throw new Error("呼叫 OpenAI API 失敗，請檢查日誌以了解詳細原因。");
+    Logger.log(`Perplexity API 請求失敗！回應代碼: ${responseCode}, 回應內容: ${responseBody}`);
+    throw new Error("呼叫 Perplexity API 失敗，請檢查日誌以了解詳細原因。");
   }
 }
 
@@ -1851,10 +1849,10 @@ function generateSingleStockReport(ticker) {
     `;
 
     const properties = PropertiesService.getScriptProperties();
-    const openAIApiKey = properties.getProperty('OPENAI_API_KEY');
-    if (!openAIApiKey) return "錯誤：未設定 OpenAI API Key。";
+    const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY'); // 讀取 Perplexity Key
+    if (!perplexityApiKey) return "錯誤：未設定 Perplexity API Key。";
     
-    return callOpenAI_forGAS(prompt, openAIApiKey);
+    return callPerplexity_forGAS(prompt, perplexityApiKey);
 
   } catch (err) {
     Logger.log(`generateSingleStockReport 發生錯誤: ${err}`);
