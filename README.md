@@ -1786,8 +1786,6 @@ function handleTextMessage(message, replyToken, userId) {
     pushToLINEforGAS(reportParts, userId);
     return;
   }
-
-  // ... (此函式中其他的指令區塊，例如 "加入"、"速讀" 等，都維持原樣不需修改) ...
   
   // --- 指令 2: 新增股票至風控報表 ---
   const addMatch = trimmedMessage.match(/^(加入|新增)\s*([\w\d]+)$/);
@@ -1842,10 +1840,7 @@ function handleTextMessage(message, replyToken, userId) {
 }
 
 
-//產生單一個股的深度分析報告 (這部分邏輯不變)
-// =======================================================================
-// ★★★ 升級版：單一個股深度分析報告 (整合即時查詢) ★★★
-// =======================================================================
+//產生單一個股的深度分析報告
 function generateSingleStockReport(tickerOrName) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2110,9 +2105,8 @@ function fetchLatestTaiexData() {
   }
 }
 
-// =======================================================================
-// ★★★ 全新模組：動態新增股票至風控報表 ★★★
-// =======================================================================
+
+// 動態新增股票至風控報表
 function addStockToReport(ticker) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('風控報表');
@@ -2231,7 +2225,7 @@ function generateEarningsReport(ticker, period) {
   const lastYearQuarter = financials.length >= 5 ? financials[4] : null; 
 
   const prompt = `
-      你是一位頂尖的產業分析師，專長是從財報中解讀公司的【長期競爭力】與【未來成長趨勢】。
+      你是一位頂尖的產業分析師，專長是從財報中解讀公司的【短期市場新聞】【長期競爭力】與【未來成長趨勢】。
       請依據我提供的財務數據，為 "${ticker}" 撰寫一份專業的財報速讀報告。
 
       報告需包含三大部分：
@@ -2241,12 +2235,16 @@ function generateEarningsReport(ticker, period) {
 
     2.  **【獲利能力與體質檢視】**:
         * 公司的「毛利率(GrossProfit)」和「營業利益率(OperatingIncome)」是否有提升？這反映了什麼樣的產業地位或成本控制能力？
-        * 「自由現金流(FreeCashFlow)」的狀況如何？是否健康？
+        * 潛在風險: 找出 1-2 個最值得警惕的【風險指標】（例如：負債比過高、營收衰退、本益比位於歷史高檔等）
 
-    3.  **【未來展望分析 (Forward-Looking)】**:
+    3.  **質化護城河評估 (Qualitative Moat Assessment)**:
+        * 根據最新的新聞標題，推斷並評估該公司可能擁有哪些經濟護城河？（例如：無形資產、成本優勢、網絡效應等）。新聞中是否有任何資訊可能正在【加寬】或【侵蝕】這條護城河？    
+        * 綜合「新聞情緒分數」、「法人買賣超」與「成交量變化」，判斷市場當前對這支股票的【短期】情緒是偏向樂觀、悲觀還是中性？這種情緒是否有基本面支撐？
+
+    4.  **【未來展望分析 (Forward-Looking)】**:
         * 綜合評估，你認為這份財報對公司【未來半年的股價走勢】可能帶來什麼正面或負面的影響？投資人應該關注的下一個關鍵點是什麼？
 
-
+    關鍵指令：請在以上 1, 2, 3, 4每一個要點分析結束後，都必須加上一行獨立的 "---###---" 作為分隔符。
     ---
     [財務數據]
     - 最新一季 (${latestQuarter.date}): ${JSON.stringify(latestQuarter, null, 2)}
@@ -2318,7 +2316,7 @@ function generatePortfolioReport() {
 
         2.  **【資產配置調整建議】**:
            * 基於這些風險，我是否需要考慮【調整持股比例】？例如，減碼風險較高的標的，轉而加碼基本面穩固的持股？請點名 1-2 檔最需要我重新審視其【在投資組合中佔比】的股票，並說明原因。
-
+           
         ---
         [風險清單]
         ${portfolioRisks.join('\n')}
@@ -2394,6 +2392,23 @@ function fetchRealTimeStockData(ticker) {
   Logger.log(`即時抓取 ${ticker} 資料完成: ${JSON.stringify(data)}`);
   return data;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
