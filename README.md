@@ -832,43 +832,49 @@ function fetchHistoricalFinancials(ticker, years) {
   startDate.setFullYear(startDate.getFullYear() - years);
   const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
 
-  const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockFinancialStatements&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
-  
-  try {
-    const res = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
-    const json = JSON.parse(res.getContentText());
-    if (!json.data || json.data.length === 0) { return null; }
+  // ★ 關鍵修正：同時從「綜合損益表」和「現金流量表」等來源獲取數據，讓資料更完整
+  const datasets = ["TaiwanStockFinancialStatements", "TaiwanStockCashFlowStatement"];
+  let combinedRawData = [];
 
-    const mapping = {
-      'Revenue': ['Revenue'],
-      'GrossProfit': ['GrossProfit'],
-      'OperatingIncome': ['OperatingIncome'],
-      'NetIncome': ['IncomeAfterTaxes', 'EquityAttributableToOwnersOfParent'],
-      'EPS': ['EPS', 'BasicEarningsPerShare'],
-    };
-
-    const allDates = [...new Set(json.data.map(item => item.date))].sort((a, b) => new Date(b) - new Date(a));
-    if (allDates.length === 0) return null;
-
-    const parsedHistory = [];
-    for (const date of allDates) {
-      const quarterRawData = json.data.filter(item => item.date === date);
-      const quarterResult = { date: date };
-
-      for (const key in mapping) {
-        const keywords = mapping[key];
-        const foundItem = quarterRawData.find(item => keywords.includes(item.type));
-        quarterResult[key] = foundItem ? foundItem.value : null;
+  for (const dataset of datasets) {
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+    try {
+      const res = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+      const json = JSON.parse(res.getContentText());
+      if (json.data && json.data.length > 0) {
+        combinedRawData = combinedRawData.concat(json.data);
       }
-      parsedHistory.push(quarterResult);
+    } catch (e) {
+      Logger.log(`⚠️ 在抓取 ${ticker} 的 ${dataset} 資料時發生錯誤: ${e}`);
     }
-    
-    return parsedHistory;
-
-  } catch (e) {
-    Logger.log(`⚠️ ${ticker}: 抓取歷史財報時發生錯誤: ${e}`);
-    return null;
   }
+
+  if (combinedRawData.length === 0) return null;
+
+  // --- 後續的資料解析邏輯 (與您現有的版本類似，但更穩健) ---
+  const mapping = {
+    'Revenue': ['Revenue'], 'GrossProfit': ['GrossProfit'],
+    'OperatingIncome': ['OperatingIncome'], 'NetIncome': ['IncomeAfterTaxes', 'EquityAttributableToOwnersOfParent'],
+    'EPS': ['EPS', 'BasicEarningsPerShare'], 'FreeCashFlow': ['FreeCashFlow']
+  };
+
+  const allDates = [...new Set(combinedRawData.map(item => item.date))].sort((a, b) => new Date(b) - new Date(a));
+  if (allDates.length === 0) return null;
+
+  const parsedHistory = [];
+  for (const date of allDates) {
+    const quarterRawData = combinedRawData.filter(item => item.date === date);
+    const quarterResult = { date: date };
+
+    for (const key in mapping) {
+      const keywords = mapping[key];
+      const foundItem = quarterRawData.find(item => keywords.includes(item.type));
+      quarterResult[key] = foundItem ? foundItem.value : null;
+    }
+    parsedHistory.push(quarterResult);
+  }
+  
+  return parsedHistory;
 }
 
 //【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額
@@ -1706,7 +1712,7 @@ function callPerplexity_forGAS(prompt, apiKey) {
   const apiUrl = "https://api.perplexity.ai/chat/completions";
   
   const requestBody = {
-    model: "llama-3-sonar-large-32k-online", // Perplexity 推薦的、有網路連線能力的大模型
+    model: "sonar", 
     messages: [
       { role: "system", content: "You are a helpful assistant." },
       { role: "user", content: prompt }
@@ -1732,14 +1738,14 @@ function callPerplexity_forGAS(prompt, apiKey) {
     const jsonResponse = JSON.parse(responseBody);
     return jsonResponse.choices[0].message.content.trim();
   } else {
+    // 為了讓日誌更清晰，我們把錯誤訊息也記錄下來
     Logger.log(`Perplexity API 請求失敗！回應代碼: ${responseCode}, 回應內容: ${responseBody}`);
-    throw new Error("呼叫 Perplexity API 失敗，請檢查日誌以了解詳細原因。");
+    // 拋出更詳細的錯誤，方便偵錯
+    throw new Error(`Perplexity API 請求失敗！ \n\n回應代碼: ${responseCode}\n回應內容: ${responseBody}`);
   }
 }
 
-// =======================================================================
 // ★★★ 最終版：強健型 LINE 互動查詢核心 ★★★
-// =======================================================================
 //Webhook 主入口：這是 Google 執行 Web App 的標準進入點。
 function doPost(e) {
   if (e === undefined || e.postData === undefined || e.postData.contents === undefined) {
@@ -1750,106 +1756,195 @@ function doPost(e) {
     if (event.type === "message" && event.message.type === "text") {
       const userMessage = event.message.text;
       const replyToken = event.replyToken;
-      const userId = event.source.userId; // ★ 關鍵：取得使用者的 ID
+      const userId = event.source.userId;
       handleTextMessage(userMessage, replyToken, userId);
     }
   });
   return ContentService.createTextOutput(JSON.stringify({'status':'ok'})).setMimeType(ContentService.MimeType.JSON);
 }
 
-
-//處理文字訊息的核心
+// =======================================================================
+// ★★★ 升級版：訊息處理核心 (指令路由器) ★★★
+// =======================================================================
 function handleTextMessage(message, replyToken, userId) {
-  const match = message.trim().match(/分析\s*([\w\d]+)/);
+  const trimmedMessage = message.trim();
 
-  if (match) {
-    const ticker = match[1];
-    Logger.log(`接收到分析指令，目標: ${ticker}`);
+  // --- 指令 1: 分析個股 (最常用) ---
+  const analyzeMatch = trimmedMessage.match(/^(分析|查詢)\s*([\w\d\u4e00-\u9fa5]+)$/);
+  if (analyzeMatch) {
+    const tickerOrName = analyzeMatch[2];
+    Logger.log(`接收到分析指令，目標: ${tickerOrName}`);
+    replyToLINE(replyToken, `收到請求，正在為您深度分析「${tickerOrName}」，請稍候...`);
     
-    // ★ 步驟 1: 立即回覆 (Reply)，告知使用者已收到請求
-    replyToLINE(replyToken, `收到請求，正在為您深度分析「${ticker}」，請稍候...`);
+    // 步驟 1: 正常產生完整報告
+    const reportText = generateSingleStockReport(tickerOrName);
     
-    // ★ 步驟 2: 呼叫 AI 進行耗時的分析
-    const reportText = generateSingleStockReport(ticker);
-    
-    // ★ 步驟 3: 分析完成後，用 Push API 將完整報告推送給使用者
-    pushToLINEforGAS(reportText, userId);
+    // ★ 步驟 2: 使用分隔符將報告切分成陣列
+    const reportParts = reportText.split('---###---').map(part => part.trim()).filter(part => part.length > 0);
 
-  } else {
-    // 如果不是分析指令，就用 Reply 回覆預設訊息
-    replyToLINE(replyToken, "您好！這是一個股票分析助理。\n\n如需查詢個股資訊，請輸入：「分析 [股票代碼]」，例如：「分析 2330」。");
+    // 步驟 3: 將切分好的陣列交給升級後的 push 函式進行分段發送
+    pushToLINEforGAS(reportParts, userId);
+    return;
   }
+
+  // ... (此函式中其他的指令區塊，例如 "加入"、"速讀" 等，都維持原樣不需修改) ...
+  
+  // --- 指令 2: 新增股票至風控報表 ---
+  const addMatch = trimmedMessage.match(/^(加入|新增)\s*([\w\d]+)$/);
+  if (addMatch) {
+    const ticker = addMatch[2];
+    Logger.log(`接收到新增指令，目標: ${ticker}`);
+    replyToLINE(replyToken, `好的，正在將「${ticker}」加入到您的風控報表中...`);
+    const resultMessage = addStockToReport(ticker);
+
+    if (resultMessage.startsWith("✅")) {
+        pushToLINEforGAS(resultMessage, userId); 
+        const analysisReport = generateSingleStockReport(ticker);
+        // ★ 同樣對首次分析的報告進行切分
+        const reportParts = analysisReport.split('---###---').map(part => part.trim()).filter(part => part.length > 0);
+        pushToLINEforGAS(reportParts, userId);
+    } else {
+        pushToLINEforGAS(resultMessage, userId);
+    }
+    return;
+  }
+
+  // --- 指令 3: AI 財報季智能助理 ---
+  const earningsMatch = trimmedMessage.match(/^(速讀|財報)\s*([\w\d]+)(?:\s+(.*))?$/);
+  if (earningsMatch) {
+    const ticker = earningsMatch[2];
+    const period = earningsMatch[3] || "最新一季"; 
+    
+    Logger.log(`接收到財報速讀指令，目標: ${ticker}, 期間: ${period}`);
+    replyToLINE(replyToken, `收到財報速讀請求，正在為您分析「${ticker} ${period}」的財報...`);
+    const reportText = generateEarningsReport(ticker, period);
+    pushToLINEforGAS(reportText, userId); // 財報報告較短，暫不分段
+    return;
+  }
+
+  // --- 指令 4: AI 投資組合風控官 ---
+  if (trimmedMessage === "組合分析" || trimmedMessage === "風控報告") {
+    Logger.log(`接收到投資組合分析指令`);
+    replyToLINE(replyToken, `收到投資組合分析請求，正在為您檢查整體持股風險...`);
+    const reportText = generatePortfolioReport();
+    pushToLINEforGAS(reportText, userId); // 風控報告較短，暫不分段
+    return;
+  }
+  
+  // --- 預設回覆 ---
+  const defaultReply = "您好！這是一個股票分析助理。\n\n" +
+                     "您可以嘗試以下指令：\n" +
+                     "• 分析 [股號/名稱]\n" +
+                     "• 加入 [股號]\n" +
+                     "• 速讀 [股號] (可選填季度)\n" +
+                     "• 組合分析";
+  replyToLINE(replyToken, defaultReply);
 }
 
 
 //產生單一個股的深度分析報告 (這部分邏輯不變)
-function generateSingleStockReport(ticker) {
+// =======================================================================
+// ★★★ 升級版：單一個股深度分析報告 (整合即時查詢) ★★★
+// =======================================================================
+function generateSingleStockReport(tickerOrName) {
   try {
-    Logger.log(`開始為 ${ticker} 產生單一個股深度報告...`);
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName('風控報表');
-    if (!sheet) return "錯誤：找不到「風控報表」。";
+    if (!sheet) return "錯誤：找不到「風控報表」工作表。";
     
     const data = sheet.getDataRange().getValues();
     const headers = data[0];
     const tickerCol = headers.indexOf('股票代碼');
+    const nameCol = headers.indexOf('股票名稱');
     let stockDataRow = null;
-    
+    let stockInfo = {};
+    let stockCode = "";
+    let name = "";
+    let source = ""; // 標記資料來源
+
+    // 步驟 1: 嘗試從「風控報表」中尋找資料
     for (let i = 1; i < data.length; i++) {
-      // 允許使用者輸入代碼或名稱
-      if (data[i][tickerCol] == ticker || data[i][headers.indexOf('股票名稱')] == ticker) {
+      if (data[i][tickerCol] == tickerOrName || data[i][nameCol] == tickerOrName) {
         stockDataRow = data[i];
         break;
       }
     }
 
-    if (!stockDataRow) return `錯誤：在你的清單中找不到股票 "${ticker}"。`;
-    
-    let stockInfo = {};
-    const stockCode = stockDataRow[tickerCol];
-    const name = stockDataRow[headers.indexOf('股票名稱')];
-    
-    // ★★★ 全新、更完整的 relevantHeaders ★★★
-    const relevantHeaders = [
-        '今日股價', '今日成交量', '本益比', '股價營收比', '股價淨值比', 
-        '營業收入', '營業毛利', '營業利益', '稅後淨利', '營業費用', 
-        '每股盈餘', '存貨', '本期綜合損益總額', '流動資產總計', '非流動資產總計', 
-        '流動負債總計', '非流動負債總計', '股東權益總額', '負債比', '負債總額', 
-        '資產總額', '營收 YoY', 'EPS YoY', '除息日', '股利發放日', 
-        '現金股利', '股票股利', '殖利率', '股利發放率', '股利來源', 
-        '連續配息年數', '每股營收', 
-        '每股淨值', '在外流通股數', 'EPS (近四季)', 
-        '營業毛利 (近四季)', '營業收入 (近四季)', '稅後淨利 (近四季)', 
-        '外資買超張數', '投信買超張數', '融資餘額', '券賣餘額', 
-        '外資連買天數', '投信連買天數', '歷史本益比位階(%)',
-        '近10日均量', '均線排列', '是否突破前高', '是否跌破支撐','近七日新聞則數', '近期新聞情緒分數'
-    ];
-
-    relevantHeaders.forEach(header => {
+    // 步驟 2: 判斷資料來源
+    if (stockDataRow) {
+      // --- 狀況 A: 股票在報表中，使用表內現有數據 ---
+      source = "來自您的風控報表";
+      Logger.log(`在風控報表中找到 ${tickerOrName}，使用表內資料進行分析。`);
+      stockCode = stockDataRow[tickerCol];
+      name = stockDataRow[nameCol];
+      
+      const relevantHeaders = [
+        '今日股價', '本益比', '股價淨值比', '營收 YoY', 'EPS YoY', '現金股利', 
+        '殖利率', '連續配息年數', 'EPS (近四季)', '外資連買天數', '投信連買天數', 
+        '歷史本益比位階(%)', '均線排列', '是否突破前高', '是否跌破支撐', '近期新聞情緒分數'
+      ];
+      relevantHeaders.forEach(header => {
         const index = headers.indexOf(header);
         if(index !== -1){
-            // 為了讓 JSON 更乾淨，我們可以在這裡把 "股票代碼" 和 "股票名稱" 濾掉，因為它們會單獨顯示
-            if (header !== '股票代碼' && header !== '股票名稱') {
-                stockInfo[header] = stockDataRow[index];
-            }
+            stockInfo[header] = stockDataRow[index];
         }
-    });
+      });
 
+    } else {
+      // --- 狀況 B: 股票不在報表中，啟用即時線上抓取模式 ---
+      source = "即時線上查詢";
+      stockCode = tickerOrName; // 假設使用者輸入的是代碼
+      Logger.log(`風控報表中找不到 ${stockCode}，啟用即時線上抓取模式。`);
+      
+      // ★ 執行即時資料抓取 (這是一個我們需要新增的輔助函式)
+      stockInfo = fetchRealTimeStockData(stockCode);
+      
+      if (!stockInfo || !stockInfo.股票名稱) {
+        return `錯誤：無法查詢到股票 "${stockCode}" 的即時資料，請確認股票代碼是否正確。`;
+      }
+      name = stockInfo.股票名稱;
+    }
+
+    // 步驟 3: 組合 Prompt 並呼叫 AI
     const newsTitles = fetchNewsForStock_forGAS(stockCode, name);
+    let promptFooter = `\n\n分析完畢。`;
+    if (!stockDataRow) {
+        promptFooter = `\n\n---
+        **操作提示**: 此股票目前不在您的追蹤清單中。若分析後您想將其納入每日追蹤，請直接傳送指令：\n"加入 ${stockCode}"`;
+    }
 
     const prompt = `
-      你是一位專業的股票分析師，請為我分析 "${name} (${stockCode})" 這檔個股。
-      你的分析需要結合我提供的「量化數據」和「最新新聞標題」，並給我一份包含以下三點的簡潔報告：
-      1.  **【關鍵數據解讀】**: 從我提供的所有數據中，找出最值得關注的 2-3 個亮點或風險。
-      2.  **【新聞情緒分析】**: 判斷近期的新聞消息是偏向利多、利空還是中性？
-      3.  **【綜合投資建議】**: 根據以上分析，給我一個明確的、針對中長期價值投資者的操作建議。
+      你是一位專注於【中長期價值投資】與【波段操作】的基金經理人。
 
+      請為我深度分析 "${name} (${stockCode})" 這檔個股，你的報告需要像一份給投資委員會的內部決策備忘錄，並包含以下四點：
+
+      1.  **【長期持有價值評估】**:
+         * 從「連續配息年數」、「殖利率」、「EPS (近四季)」等數據，評估這家公司是否具備【穩定獲利】的體質，值得長期持有？
+         * 它的「歷史本益比位階」目前在哪個區間？這對長期投資者意味著什麼？
+
+      2.  **【中期成長動能分析】**:
+          * 結合「營收YoY」、「EPS YoY」與最新的新聞情緒，判斷公司目前是處於【成長加速】、【成長趨緩】還是【衰退】的階段？
+
+      3.  **【波段操作技術面觀察】**:
+          * 從「均線排列」、「是否突破前高/跌破支撐」等指標，判斷目前是否為一個【適合進場】的波段操作時機點？還是應該【觀望或減碼】？
+
+      4.  **【市場情緒與動態 (Market Sentiment & Momentum)】**:
+          * 綜合「新聞情緒分數」、「法人買賣超」與「成交量變化」，判斷市場當前對這支股票的【短期】情緒是偏向樂觀、悲觀還是中性？這種情緒是否有基本面支撐？    
+
+      5.  **【綜合策略建議】**:
+         * 總結以上分析，給我一個明確的投資策略。例如：「建議在 XXX 價位附近開始分批佈局，目標是 XXX，停損點設在季線下方。」
+        
+      ★★★ 關鍵指令：請在以上 1, 2, 3, 4, 5 每一個要點分析結束後，都必須加上一行獨立的 "---###---" 作為分隔符。★★★
+      ---
+      [輸入資料]
+      資料來源: ${source}
       量化數據: ${JSON.stringify(stockInfo, null, 2)}
       最新新聞標題: ${newsTitles}
-    `;
+      ${promptFooter}
+       `;
 
     const properties = PropertiesService.getScriptProperties();
-    const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY'); // 讀取 Perplexity Key
+    const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY');
     if (!perplexityApiKey) return "錯誤：未設定 Perplexity API Key。";
     
     return callPerplexity_forGAS(prompt, perplexityApiKey);
@@ -1879,37 +1974,42 @@ function replyToLINE(replyToken, messageText) {
 }
 
 
-/**
- * ★ 升級版：專門用於「推送長訊息」的 Push 函式 (已內建拆分功能) ★
- */
-function pushToLINEforGAS(messageText, userId) {
+//專門用於「推送長訊息」的 Push 函式 (已內建拆分功能) ★
+function pushToLINEforGAS(messages, userId) {
   const url = "https://api.line.me/v2/bot/message/push";
   const properties = PropertiesService.getScriptProperties();
   const lineToken = properties.getProperty('LINE_CHANNEL_TOKEN');
   
-  const MAX_LENGTH = 4800;
-  let messages = [];
+  let messageObjects = [];
 
-  if (messageText.length > MAX_LENGTH) {
-    Logger.log("訊息過長，開始進行 Push 拆分...");
-    let tempMessage = messageText;
-    while (tempMessage.length > 0) {
-      let chunk = tempMessage.substring(0, MAX_LENGTH);
-      messages.push({ type: 'text', text: chunk });
-      tempMessage = tempMessage.substring(MAX_LENGTH);
-    }
+  // 步驟 1: 判斷傳入的 messages 是單一字串還是陣列
+  if (Array.isArray(messages)) {
+    // 如果是陣列，將陣列中的每個字串都轉換成 LINE 的訊息物件格式
+    messageObjects = messages.map(text => ({ type: 'text', text: text }));
+  } else if (typeof messages === 'string') {
+    // 如果是單一字串，就把它放進一個陣列中
+    messageObjects = [{ type: 'text', text: messages }];
   } else {
-    messages.push({ type: 'text', text: messageText });
+    Logger.log("❌ pushToLINEforGAS 錯誤：傳入的訊息格式不正確 (既不是字串也不是陣列)");
+    return;
   }
   
-  if (messages.length > 5) {
-      messages = messages.slice(0, 5);
+  // LINE API 一次最多只能發送 5 則 push 訊息
+  if (messageObjects.length > 5) {
+      messageObjects = messageObjects.slice(0, 5);
+      Logger.log("⚠️ 訊息超過 5 則，已自動截斷。");
+  }
+
+  if (messageObjects.length === 0) {
+    Logger.log("ℹ️ 沒有需要發送的訊息。");
+    return;
   }
 
   const payload = {
     to: userId,
-    messages: messages
+    messages: messageObjects
   };
+
   const options = {
     method: 'post',
     headers: { 'Authorization': 'Bearer ' + lineToken },
@@ -2010,27 +2110,290 @@ function fetchLatestTaiexData() {
   }
 }
 
+// =======================================================================
+// ★★★ 全新模組：動態新增股票至風控報表 ★★★
+// =======================================================================
+function addStockToReport(ticker) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('風控報表');
+    if (!sheet) return "錯誤：找不到「風控報表」工作表。";
+
+    const data = sheet.getRange("A:A").getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (data[i][0] == ticker) {
+        return `提醒：「${ticker}」已經存在於您的風控報表中，無需重複加入。`;
+      }
+    }
+
+    // 步驟 1: 先在表格最後加上股票代碼，佔住一個位置
+    sheet.appendRow([ticker]);
+    const newRowIndex = sheet.getLastRow(); // 取得新股票所在的列數
+
+    // 步驟 2: 呼叫一個全新的「單一個股更新引擎」函式
+    Logger.log(`正在為新加入的 ${ticker} 執行首次數據填充...`);
+    const newRowData = runSingleStockUpdate(ticker, sheet);
+
+    // 步驟 3: 如果成功抓到數據，就將整列資料寫回對應的位置
+    if (newRowData) {
+      // newRowData 是一個陣列，我們需要將它轉換為 Google Sheet 的二維陣列格式
+      sheet.getRange(newRowIndex, 1, 1, newRowData.length).setValues([newRowData]);
+      Logger.log(`✅ ${ticker} 的首次數據填充成功！`);
+      return `✅ 已成功將「${ticker}」加入風控報表，並完成首次數據即時更新！`;
+    } else {
+      Logger.log(`❌ ${ticker} 的首次數據填充失敗。`);
+      return `❌ 已將「${ticker}」加入風控報表，但首次數據更新失敗，詳細數據將在下一次每日更新時重試。`;
+    }
+
+  } catch (e) {
+    Logger.log(`新增股票時發生錯誤: ${e}`);
+    return `❌ 新增股票「${ticker}」時發生錯誤，請查看 Apps Script 後台日誌。`;
+  }
+}
+
+// ★★★ 全新核心引擎：單一個股更新器 ★★★
+// 這個函式負責抓取和計算一支股票需要的所有數據，並回傳一個完整的陣列
+function runSingleStockUpdate(ticker, sheet) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let rowData = new Array(headers.length).fill(''); // 建立一個和標題一樣長的空白陣列
+  
+  // 建立一個 map 來快速查找欄位索引
+  const colMap = headers.reduce((map, header, index) => {
+    map[header] = index;
+    return map;
+  }, {});
+
+  rowData[colMap['股票代碼']] = ticker;
+
+  // --- 依序執行各模組的數據抓取與計算 ---
+  
+  // 1. 基本資料
+  const stockInfo = fetchFinMindStockInfo(ticker);
+  if (stockInfo) {
+    rowData[colMap['股票名稱']] = stockInfo.name;
+    rowData[colMap['產業別']] = stockInfo.industry;
+  }
+
+  // 2. 歷史財報 (滾動四季)
+  const historicalData = fetchHistoricalFinancials(ticker, 3);
+  if (historicalData && historicalData.length >= 4) {
+    const lastFour = historicalData.slice(0, 4);
+    rowData[colMap['EPS (近四季)']] = lastFour.reduce((sum, q) => sum + (q.EPS || 0), 0).toFixed(2);
+    rowData[colMap['營業收入 (近四季)']] = lastFour.reduce((sum, q) => sum + (q.Revenue || 0), 0);
+  }
+
+  // 3. 股利與流通股數
+  const dividendData = fetchAllBaseData_Definitive(ticker);
+  if (dividendData) {
+      rowData[colMap['在外流通股數']] = dividendData.shares_outstanding;
+      rowData[colMap['現金股利']] = dividendData.cash_dividend;
+      // ... 其他股利相關欄位
+  }
+
+  // 4. 最新股價與估值計算
+  const priceData = fetchFinMindStockPrice(ticker, Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd"));
+  if (priceData) {
+    const price = priceData.price;
+    const ttmEps = rowData[colMap['EPS (近四季)']];
+    rowData[colMap['今日股價']] = price;
+    rowData[colMap['今日成交量']] = priceData.volume;
+    if (ttmEps > 0) {
+      rowData[colMap['本益比']] = (price / ttmEps).toFixed(2);
+    }
+  }
+  
+  // 5. 技術指標
+  const techData = fetchAndCalculateTechIndicators(ticker);
+  if (techData) {
+    const { ma5, ma20, ma60, high60, todayClose } = techData;
+    if (ma5 > ma20 && ma20 > ma60) rowData[colMap['均線排列']] = '多頭排列';
+    else if (ma5 < ma20 && ma20 < ma60) rowData[colMap['均線排列']] = '空頭排列';
+    else rowData[colMap['均線排列']] = '盤整';
+    rowData[colMap['是否突破前高']] = todayClose >= high60 ? '是' : '否';
+  }
+  
+  return rowData;
+}
+
+//AI 財報季智能助理
+function generateEarningsReport(ticker, period) {
+  Logger.log(`開始為 ${ticker} 產生財報分析報告...`);
+  // ★ 關鍵修正：抓取至少 2 年的歷史財報，確保有去年同期數據可比較
+  const financials = fetchHistoricalFinancials(ticker, 2); 
+
+  if (!financials || financials.length < 2) {
+    return `資料不足：無法從 FinMind 獲取 ${ticker} 足夠的歷史財報數據來進行比較分析。請確認該股票是否為新上市或資料來源有問題。`;
+  }
+
+  // 聰明地找出最新一季、上一季、以及去年同期的數據
+  const latestQuarter = financials[0];
+  const prevQuarter = financials[1];
+  // 去年同期通常是 4 季之前
+  const lastYearQuarter = financials.length >= 5 ? financials[4] : null; 
+
+  const prompt = `
+      你是一位頂尖的產業分析師，專長是從財報中解讀公司的【長期競爭力】與【未來成長趨勢】。
+      請依據我提供的財務數據，為 "${ticker}" 撰寫一份專業的財報速讀報告。
+
+      報告需包含三大部分：
+
+    1.  **【核心營運表現】**:
+         * 本季的「營收(Revenue)」與「每股盈餘(EPS)」表現如何？與【去年同期】相比，成長動能是增強還是減弱？
+
+    2.  **【獲利能力與體質檢視】**:
+        * 公司的「毛利率(GrossProfit)」和「營業利益率(OperatingIncome)」是否有提升？這反映了什麼樣的產業地位或成本控制能力？
+        * 「自由現金流(FreeCashFlow)」的狀況如何？是否健康？
+
+    3.  **【未來展望分析 (Forward-Looking)】**:
+        * 綜合評估，你認為這份財報對公司【未來半年的股價走勢】可能帶來什麼正面或負面的影響？投資人應該關注的下一個關鍵點是什麼？
 
 
+    ---
+    [財務數據]
+    - 最新一季 (${latestQuarter.date}): ${JSON.stringify(latestQuarter, null, 2)}
+    - 上一季 (${prevQuarter.date}): ${JSON.stringify(prevQuarter, null, 2)}
+    - 去年同期 (${lastYearQuarter ? lastYearQuarter.date : 'N/A'}): ${JSON.stringify(lastYearQuarter, null, 2)}
+    ---
+  `;
+
+  const properties = PropertiesService.getScriptProperties();
+  const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY');
+  return callPerplexity_forGAS(prompt, perplexityApiKey);
+}
+
+//我的持股工作表：AI 投資組合風控官 
+function generatePortfolioReport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // 假設您有一個名為「我的持股」的工作表
+  const holdingSheet = ss.getSheetByName('我的持股'); 
+  const reportSheet = ss.getSheetByName('風控報表');
+
+  if (!holdingSheet) {
+    return "錯誤：找不到名為「我的持股」的工作表。\n請建立該工作表，並至少包含 '股票代碼' 和 '持有成本' 兩欄。";
+  }
+  if (!reportSheet) {
+    return "錯誤：找不到「風控報表」工作表。";
+  }
+
+  const holdings = holdingSheet.getDataRange().getValues();
+  const reportData = reportSheet.getDataRange().getValues();
+  const reportHeaders = reportData[0];
+  
+  // 將風控報表轉換為以股票代碼為 key 的物件，方便快速查找
+  const reportMap = reportData.slice(1).reduce((map, row) => {
+    const ticker = row[reportHeaders.indexOf('股票代碼')];
+    map[ticker] = row;
+    return map;
+  }, {});
+
+  let portfolioRisks = [];
+  // 從第二行開始讀取持股
+  for (let i = 1; i < holdings.length; i++) {
+    const ticker = holdings[i][0]; // 假設 A 欄是股票代碼
+    if (reportMap[ticker]) {
+      const stockData = reportMap[ticker];
+      let risks = [];
+      // 在此定義您關心的風險條件
+      if (stockData[reportHeaders.indexOf('是否跌破支撐')] === '是') risks.push('跌破季線');
+      if (stockData[reportHeaders.indexOf('均線排列')] === '空頭排列') risks.push('均線空頭');
+      if (stockData[reportHeaders.indexOf('外資連買天數')] < 0 && stockData[reportHeaders.indexOf('投信連買天數')] < 0) risks.push('投信外資同賣');
+      
+      if (risks.length > 0) {
+        portfolioRisks.push(`${ticker} ${stockData[reportHeaders.indexOf('股票名稱')]}: ${risks.join(', ')}`);
+      }
+    }
+  }
+
+  if (portfolioRisks.length === 0) {
+    return "✅ 您的投資組合目前未觸發任何重大的技術面與籌碼面風險警示，整體狀況良好。";
+  }
+
+  const prompt = `
+        你是一位資深的投資組合風控顧問，服務的對象是【中長期價值投資者】。
+        以下是我目前投資組合中，觸發風險警示的股票清單。請不要給我短線的停損建議，而是從【資產配置】與【長期佈局】的角度提供建議。
+
+        報告需包含兩點：
+
+        1.  **【風險性質評估】**:
+           * 這些警示主要是屬於「短期技術面修正」的風險，還是可能影響到「長期持有價值」的結構性風險？
+
+        2.  **【資產配置調整建議】**:
+           * 基於這些風險，我是否需要考慮【調整持股比例】？例如，減碼風險較高的標的，轉而加碼基本面穩固的持股？請點名 1-2 檔最需要我重新審視其【在投資組合中佔比】的股票，並說明原因。
+
+        ---
+        [風險清單]
+        ${portfolioRisks.join('\n')}
+        ---
+          `;
+  
+  const properties = PropertiesService.getScriptProperties();
+  const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY');
+  return callPerplexity_forGAS(prompt, perplexityApiKey);
+}
 
 
+//輔助函式：即時抓取單一股票的綜合數據
+function fetchRealTimeStockData(ticker) {
+  let data = {};
 
+  // 1. 獲取基本資料 (名稱、產業)
+  const stockInfo = fetchFinMindStockInfo(ticker);
+  if (stockInfo) {
+    data.股票名稱 = stockInfo.name;
+    data.產業別 = stockInfo.industry;
+  } else {
+    return null; // 如果連基本資料都抓不到，直接返回
+  }
 
+  // 2. 獲取最新股價與成交量
+  let latestStockData = null;
+  let tryDate = new Date();
+  for (let j = 0; j < 5; j++) { // 往前找 5 天
+      const dateStr = Utilities.formatDate(tryDate, "Asia/Taipei", "yyyy-MM-dd");
+      const result = fetchFinMindStockPrice(ticker, dateStr);
+      if (result) {
+          latestStockData = result;
+          break;
+      }
+      tryDate.setDate(tryDate.getDate() - 1);
+  }
+  if (latestStockData) {
+    data.今日股價 = latestStockData.price;
+    data.今日成交量 = latestStockData.volume;
+  }
 
+  // 3. 獲取法人買賣超
+  const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
+  if (institutionalData) {
+    data.外資買超張數 = institutionalData.foreign_buy_sell.toFixed(2);
+    data.投信買超張數 = institutionalData.trust_buy_sell.toFixed(2);
+  }
 
+  // 4. 獲取歷史本益比位階
+  const currentPE = parseFloat(data.本益比);
+  if (!isNaN(currentPE)) {
+      const historicalPEs = fetchHistoricalPER(ticker, 3);
+      if (historicalPEs && historicalPEs.length > 0) {
+          let countBelow = 0;
+          historicalPEs.forEach(pe => { if (pe < currentPE) countBelow++; });
+          data.歷史本益比位階 = ((countBelow / historicalPEs.length) * 100).toFixed(1) + '%';
+      }
+  }
+  
+  // 5. 獲取技術指標
+  const techIndicators = fetchAndCalculateTechIndicators(ticker);
+  if (techIndicators) {
+      const { ma5, ma20, ma60, high60, todayClose, prevClose } = techIndicators;
+      if (ma5 > ma20 && ma20 > ma60) data.均線排列 = '多頭排列';
+      else if (ma5 < ma20 && ma20 < ma60) data.均線排列 = '空頭排列';
+      else data.均線排列 = '盤整';
+      
+      if (todayClose >= high60) data.是否突破前高 = '是'; else data.是否突破前高 = '否';
+      if (prevClose >= ma60 && todayClose < ma60) data.是否跌破支撐 = '是'; else data.是否跌破支撐 = '否';
+  }
 
-
-
-
-
-
-
-
-
-
-
-
-
+  Logger.log(`即時抓取 ${ticker} 資料完成: ${JSON.stringify(data)}`);
+  return data;
+}
 
 
 
