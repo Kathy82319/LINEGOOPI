@@ -881,60 +881,69 @@ function fetchHistoricalFinancials(ticker, years) {
 //在每日更新市場數據後，會自動將最新的「外資」與「投信」買賣超數據，寫入到名為「法人歷史紀錄」的新工作表中。
 function updateMarketData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('風控報表');
-  if (!sheet) {
+  const reportSheet = ss.getSheetByName('風控報表');
+  if (!reportSheet) {
     Logger.log('❌ 找不到名為 "風控報表" 的工作表');
     return;
   }
 
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
+  // 步驟 1: 確保「法人歷史紀錄」工作表存在
+  let historySheet = ss.getSheetByName('法人歷史紀錄');
+  if (!historySheet) {
+    historySheet = ss.insertSheet('法人歷史紀錄');
+    historySheet.appendRow(['日期', '股票代碼', '外資買超張數', '投信買超張數']);
+    Logger.log("✅ 已建立新的工作表: 法人歷史紀錄");
+  }
   
-  // 找到所有需要更新的籌碼欄位索引
+  const reportData = reportSheet.getDataRange().getValues();
+  const headers = reportData[0];
+  
+  // --- 找到所有需要更新的籌碼欄位索引 ---
   const tickerCol = headers.indexOf('股票代碼');
   const foreignBuyCol = headers.indexOf('外資買超張數');
   const trustBuyCol = headers.indexOf('投信買超張數');
   const marginBalanceCol = headers.indexOf('融資餘額');
   const shortBalanceCol = headers.indexOf('券賣餘額');
   
-  let updatedCount = 0;
+  const todayStr = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
 
-  // 主迴圈：逐一處理每一支股票
-  for (let i = 1; i < data.length; i++) {
-    const ticker = data[i][tickerCol] ? String(data[i][tickerCol]).trim() : null;
+  // --- 主迴圈：逐一處理每一支股票 ---
+  for (let i = 1; i < reportData.length; i++) {
+    const ticker = reportData[i][tickerCol] ? String(reportData[i][tickerCol]).trim() : null;
     if (!ticker) continue;
 
-    let updated = false;
-
-    // --- 步驟 1: 獲取三大法人買賣超 ---
+    // --- 模組 A: 獲取三大法人買賣超 ---
     const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
     if (institutionalData) {
-      if (foreignBuyCol !== -1) data[i][foreignBuyCol] = institutionalData.foreign_buy_sell;
-      if (trustBuyCol !== -1) data[i][trustBuyCol] = institutionalData.trust_buy_sell;
-      updated = true;
+      const foreignBuySell = institutionalData.foreign_buy_sell;
+      const trustBuySell = institutionalData.trust_buy_sell;
+
+      // 更新「風控報表」上的今日數據
+      if (foreignBuyCol !== -1) reportData[i][foreignBuyCol] = foreignBuySell;
+      if (trustBuyCol !== -1) reportData[i][trustBuyCol] = trustBuySell;
+      
+      // 將今日數據寫入「法人歷史紀錄」工作表 (為計算連買天數使用)
+      historySheet.appendRow([todayStr, ticker, foreignBuySell, trustBuySell]);
+
     } else {
-      Logger.log(`-> ${ticker}: 在 FinMind 中找不到「三大法人」資料。`);
+      Logger.log(`-> ${ticker}: 找不到「三大法人」資料。`);
     }
 
-    // --- 步驟 2: 獲取融資融券餘額 ---
+    // ★★★ 模組 B: 獲取融資融券餘額 (加回來的部分) ★★★
     const marginData = fetchFinMindMarginData(ticker);
     if (marginData) {
-      if (marginBalanceCol !== -1) data[i][marginBalanceCol] = marginData.margin_balance;
-      if (shortBalanceCol !== -1) data[i][shortBalanceCol] = marginData.short_balance;
-      updated = true;
+      if (marginBalanceCol !== -1) reportData[i][marginBalanceCol] = marginData.margin_balance;
+      if (shortBalanceCol !== -1) reportData[i][shortBalanceCol] = marginData.short_balance;
     } else {
-      Logger.log(`-> ${ticker}: 在 FinMind 中找不到「融資融券餘額」資料。`);
-    }
-    
-    if (updated) {
-      updatedCount++;
+      Logger.log(`-> ${ticker}: 找不到「融資融券餘額」資料。`);
     }
   }
 
   // 將所有更新一次性寫回 Google Sheet
-  sheet.getDataRange().setValues(data);
-  Logger.log(`✅ 市場籌碼數據更新完成！總共處理了 ${updatedCount} 支股票的資料。`);
+  reportSheet.getDataRange().setValues(reportData);
+  Logger.log(`✅ 市場籌碼數據更新完成，並已同步寫入歷史紀錄。`);
 }
+
 
 //【融資融券輔助函式】
 function fetchFinMindMarginData(ticker) {
@@ -1745,7 +1754,7 @@ function callPerplexity_forGAS(prompt, apiKey) {
   }
 }
 
-// ★★★ 最終版：強健型 LINE 互動查詢核心 ★★★
+// LINE 互動查詢核心 ★★★
 //Webhook 主入口：這是 Google 執行 Web App 的標準進入點。
 function doPost(e) {
   if (e === undefined || e.postData === undefined || e.postData.contents === undefined) {
@@ -1763,9 +1772,8 @@ function doPost(e) {
   return ContentService.createTextOutput(JSON.stringify({'status':'ok'})).setMimeType(ContentService.MimeType.JSON);
 }
 
-// =======================================================================
-// ★★★ 升級版：訊息處理核心 (指令路由器) ★★★
-// =======================================================================
+
+// 訊息處理核心 (指令路由器)
 function handleTextMessage(message, replyToken, userId) {
   const trimmedMessage = message.trim();
 
@@ -1969,7 +1977,7 @@ function replyToLINE(replyToken, messageText) {
 }
 
 
-//專門用於「推送長訊息」的 Push 函式 (已內建拆分功能) ★
+//專門用於「推送長訊息」的 Push 函式 (已內建拆分功能) 
 function pushToLINEforGAS(messages, userId) {
   const url = "https://api.line.me/v2/bot/message/push";
   const properties = PropertiesService.getScriptProperties();
