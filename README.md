@@ -208,6 +208,8 @@ function runDailyUpdate() {
   // ★★★ 全新步驟 0: 更新大盤日誌 ★★★
   Logger.log("--> 步驟 0/5: 更新大盤日誌...");
   updateTaiexLog();
+  Logger.log("--> 新步驟: 更新市場羅盤指標...");
+  updateMarketIndicators();
 
   // 順序 1: 【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額 
   Logger.log("--> 步驟 1/5: 更新市場數據 (法人、融資券)...");
@@ -1077,75 +1079,100 @@ function updateMarketData() {
     return;
   }
 
-  // 步驟 1: 確保「法人歷史紀錄」工作表存在
   let historySheet = ss.getSheetByName('法人歷史紀錄');
   if (!historySheet) {
     historySheet = ss.insertSheet('法人歷史紀錄');
-    historySheet.appendRow(['日期', '股票代碼', '外資買超張數', '投信買超張數']);
-    Logger.log("✅ 已建立新的工作表: 法人歷史紀錄");
+    historySheet.appendRow(['日期', '股票代碼', '外資買賣超(張)', '投信買賣超(張)']);
+  }
+
+  // 1. 獲取正確的「最新交易日」
+  const targetDateStr = getLatestTradingDateStr();
+  Logger.log(`目標資料日期: ${targetDateStr}`);
+
+  // 2. 建立可靠的檢查清單，防止重複寫入歷史紀錄
+  const historyData = historySheet.getDataRange().getValues();
+  const existingRecords = new Set();
+  for (let i = 1; i < historyData.length; i++) {
+    const date = Utilities.formatDate(new Date(historyData[i][0]), "Asia/Taipei", "yyyy-MM-dd");
+    const ticker = historyData[i][1];
+    existingRecords.add(`${date}_${ticker}`);
   }
   
   const reportData = reportSheet.getDataRange().getValues();
   const headers = reportData[0];
-  
-  // --- 找到所有需要更新的籌碼欄位索引 ---
-  const tickerCol = headers.indexOf('股票代碼');
-  const foreignBuyCol = headers.indexOf('外資買超張數');
-  const trustBuyCol = headers.indexOf('投信買超張數');
-  const marginBalanceCol = headers.indexOf('融資餘額');
-  const shortBalanceCol = headers.indexOf('券賣餘額');
-  
-  const todayStr = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
+  const colMap = headers.reduce((map, header, index) => {
+    map[header] = index;
+    return map;
+  }, {});
 
-  // --- 主迴圈：逐一處理每一支股票 ---
+  const newHistoryRows = []; // 暫存需要新增的歷史紀錄，最後再一次性寫入
+
   for (let i = 1; i < reportData.length; i++) {
-    const ticker = reportData[i][tickerCol] ? String(reportData[i][tickerCol]).trim() : null;
+    const ticker = reportData[i][colMap['股票代碼']] ? String(reportData[i][colMap['股票代碼']]).trim() : null;
     if (!ticker) continue;
 
-    // --- 模組 A: 獲取三大法人買賣超 ---
-    const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
+    // 3. 抓取法人買賣超
+    const institutionalData = fetchFinMindInstitutionalInvestors(ticker, targetDateStr);
     if (institutionalData) {
-      const foreignBuySell = institutionalData.foreign_buy_sell;
-      const trustBuySell = institutionalData.trust_buy_sell;
-
-      // 更新「風控報表」上的今日數據
-      if (foreignBuyCol !== -1) reportData[i][foreignBuyCol] = foreignBuySell;
-      if (trustBuyCol !== -1) reportData[i][trustBuyCol] = trustBuySell;
+      reportData[i][colMap['外資買超張數']] = institutionalData.foreign_buy_sell;
+      reportData[i][colMap['投信買超張數']] = institutionalData.trust_buy_sell;
       
-      // 將今日數據寫入「法人歷史紀錄」工作表 (為計算連買天數使用)
-      historySheet.appendRow([todayStr, ticker, foreignBuySell, trustBuySell]);
-
-    } else {
-      Logger.log(`-> ${ticker}: 找不到「三大法人」資料。`);
+      const recordKey = `${targetDateStr}_${ticker}`;
+      if (!existingRecords.has(recordKey)) {
+        newHistoryRows.push([targetDateStr, ticker, institutionalData.foreign_buy_sell, institutionalData.trust_buy_sell]);
+        existingRecords.add(recordKey);
+      }
     }
 
-    //模組 B: 獲取融資融券餘額 
-    const marginData = fetchFinMindMarginData(ticker);
+    // 4. 抓取融資融券
+    const marginData = fetchFinMindMarginData(ticker, targetDateStr);
     if (marginData) {
-      if (marginBalanceCol !== -1) reportData[i][marginBalanceCol] = marginData.margin_balance;
-      if (shortBalanceCol !== -1) reportData[i][shortBalanceCol] = marginData.short_balance;
-    } else {
-      Logger.log(`-> ${ticker}: 找不到「融資融券餘額」資料。`);
+      reportData[i][colMap['融資餘額']] = marginData.margin_balance;
+      reportData[i][colMap['券賣餘額']] = marginData.short_balance;
     }
   }
 
-  // 將所有更新一次性寫回 Google Sheet
+  // 5. 將所有更新一次性寫回，提高效率
   reportSheet.getDataRange().setValues(reportData);
-  Logger.log(`✅ 市場籌碼數據更新完成，並已同步寫入歷史紀錄。`);
+  if (newHistoryRows.length > 0) {
+    historySheet.getRange(historySheet.getLastRow() + 1, 1, newHistoryRows.length, 4).setValues(newHistoryRows);
+    Logger.log(`✅ 已新增 ${newHistoryRows.length} 筆法人歷史紀錄。`);
+  } else {
+    Logger.log("ℹ️ 無新的法人歷史紀錄需要新增。");
+  }
+
+  Logger.log(`✅ 市場籌碼數據更新完成！`);
 }
 
+//輔助函式：法人歷史交易紀錄取得最新交易日字串
+function getLatestTradingDateStr() {
+    let date = new Date();
+    // 如果是凌晨0點到早上8點之間執行，我們假設它要抓的是前一天的資料
+    if (date.getHours() < 8) {
+        date.setDate(date.getDate() - 1);
+    }
+    
+    // 迴圈檢查，直到找到一個非週末日
+    for (let i = 0; i < 7; i++) { 
+        const dayOfWeek = date.getDay();
+        if (dayOfWeek !== 0 && dayOfWeek !== 6) { // 0=週日, 6=週六
+            return Utilities.formatDate(date, "Asia/Taipei", "yyyy-MM-dd");
+        }
+        date.setDate(date.getDate() - 1); // 如果是週末，就往前推一天
+    }
+    return Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd"); // 備用
+}
 
-//【融資融券輔助函式】
-function fetchFinMindMarginData(ticker) {
-  // FinMind 的融資融券資料集名稱是 "TaiwanStockMarginPurchaseShortSale"
-  const dataset = "TaiwanStockMarginPurchaseShortSale";
+//【輔助函式】：獲取三大法人買賣超 (修正日期與小數點)
+function fetchFinMindInstitutionalInvestors(ticker, targetDate) {
+  const dataset = "TaiwanStockInstitutionalInvestorsBuySell";
   
-  // 我們往前找 7 天的資料，確保能抓到最近一個交易日的數據
-  const startDate = new Date();
+  // 以目標日期為中心，往前找7天，確保能覆蓋假日
+  const startDate = new Date(targetDate);
   startDate.setDate(startDate.getDate() - 7);
   const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
 
-  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&end_date=${targetDate}&token=${FINMIND_API_TOKEN}`;
 
   try {
     const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
@@ -1154,16 +1181,29 @@ function fetchFinMindMarginData(ticker) {
     if (json.data && json.data.length > 0) {
       // API 可能會回傳多筆，我們只需要最新的一筆 (通常是最後一筆)
       const latestData = json.data[json.data.length - 1];
+      
+      // 再次確認API回傳的日期是否為我們想要的目標日期
+      if (latestData.date !== targetDate) {
+        Logger.log(`⚠️ ${ticker} 的法人數據日期 (${latestData.date}) 與目標日期 (${targetDate}) 不符，可能為假日或無資料。`);
+        // return null; // 您可以選擇嚴格模式，日期不符就回傳 null
+      }
+
+      const foreignData = json.data.filter(item => item.date === latestData.date && item.name === 'Foreign_Investor')[0];
+      const trustData = json.data.filter(item => item.date === latestData.date && item.name === 'Investment_Trust')[0];
+
+      // ★ 修正 #2：使用 Math.round() 將計算結果四捨五入到整數 ★
+      const foreign_buy_sell = foreignData ? Math.round((foreignData.buy - foreignData.sell) / 1000) : 0;
+      const trust_buy_sell = trustData ? Math.round((trustData.buy - trustData.sell) / 1000) : 0;
+
       return {
-        margin_balance: latestData.MarginPurchaseTodayBalance, // 融資餘額
-        short_balance: latestData.ShortSaleTodayBalance    // 融券餘額
+        foreign_buy_sell: foreign_buy_sell,
+        trust_buy_sell: trust_buy_sell
       };
     } else {
-      // 如果 API 回應中沒有資料，就回傳 null
       return null;
     }
   } catch (e) {
-    Logger.log(`⚠️ 呼叫 FinMind 融資融券 API 時發生錯誤 (股票: ${ticker}): ${e}`);
+    Logger.log(`⚠️ 呼叫 FinMind 三大法人 API 時發生錯誤 (股票: ${ticker}): ${e}`);
     return null;
   }
 }
@@ -1204,6 +1244,34 @@ function fetchFinMindInstitutionalInvestors(ticker) {
     }
   } catch (e) {
     Logger.log(`⚠️ 呼叫 FinMind 三大法人 API 時發生錯誤 (股票: ${ticker}): ${e}`);
+    return null;
+  }
+}
+
+//輔助函式：獲取最新的融資融券餘額
+function fetchFinMindMarginData(ticker, targetDate) {
+  const dataset = "TaiwanStockMarginPurchaseShortSale";
+  const startDate = new Date(targetDate);
+  startDate.setDate(startDate.getDate() - 7);
+  const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${ticker}&start_date=${startDateStr}&end_date=${targetDate}&token=${FINMIND_API_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
+    const json = JSON.parse(response.getContentText());
+
+    if (json.data && json.data.length > 0) {
+      // FinMind 可能會回傳多筆，我們只需要最新的一筆 (通常是最後一筆)
+      const latestData = json.data[json.data.length - 1];
+      return {
+        margin_balance: latestData.MarginPurchaseTodayBalance,
+        short_balance: latestData.ShortSaleTodayBalance
+      };
+    }
+    return null;
+  } catch (e) {
+    Logger.log(`⚠️ 呼叫 FinMind 融資融券 API 時發生錯誤 (股票: ${ticker}): ${e}`);
     return null;
   }
 }
@@ -2069,7 +2137,7 @@ function generateSingleStockReport(tickerOrName) {
       Logger.log(`在風控報表中找到 ${tickerOrName}，使用表內資料進行分析。`);
       stockCode = stockDataRow[tickerCol];
       name = stockDataRow[nameCol];
-      
+      const marketStatus = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('市場指標').getRange("B5").getValue();
       const relevantHeaders = [
         '今日股價', '本益比', '股價淨值比', '營收 YoY', 'EPS YoY', '現金股利', 
         '殖利率', '連續配息年數', 'EPS (近四季)', '外資連買天數', '投信連買天數', 
@@ -2107,24 +2175,25 @@ function generateSingleStockReport(tickerOrName) {
 
     const prompt = `
       你是一位專注於【中長期價值投資】與【波段操作】的基金經理人。
-
+      你的分析需要結合市場宏觀趨勢與個股基本面，提供一份專業、多維度的決策備忘錄。
       請為我深度分析 "${name} (${stockCode})" 這檔個股，你的報告需要像一份給投資委員會的內部決策備忘錄，並包含以下四點：
 
-      1.  **【長期持有價值評估】**:
-         * 從「連續配息年數」、「殖利率」、「EPS (近四季)」等數據，評估這家公司是否具備【穩定獲利】的體質，值得長期持有？
-         * 它的「歷史本益比位階」目前在哪個區間？這對長期投資者意味著什麼？
+      1.  **【價值與成長性評估 (長中期)】**:
+          * **價值面**: 從「歷史本益比位階」、「連續配息年數」與「殖利率」來看，這家公司是否具備穩定體質？目前的估值是否合理，適合長期投資者關注？
+          * **成長面**: 結合「營收YoY」、「EPS YoY」，判斷公司的中期成長動能是正在加速、趨緩還是衰退？
 
-      2.  **【中期成長動能分析】**:
-          * 結合「營收YoY」、「EPS YoY」與最新的新聞情緒，判斷公司目前是處於【成長加速】、【成長趨緩】還是【衰退】的階段？
+      2.  **【市場情緒與機會 (短期)】**:
+          * 綜合「近七日新聞則數」、「近期新聞情緒分數」以及「法人買賣超」，判斷市場短期對它的關注度與情緒是偏向樂觀還是悲觀？
+          * 這是否為價值投資者提供了【人棄我取】的逆勢佈局機會，或是【順勢而為】的動能交易機會？
 
-      3.  **【波段操作技術面觀察】**:
-          * 從「均線排列」、「是否突破前高/跌破支撐」等指標，判斷目前是否為一個【適合進場】的波段操作時機點？還是應該【觀望或減碼】？
+      3.  **【技術面操作點位 (波段)】**:
+          * 從「均線排列」、「是否突破前高/跌破支撐」等指標，判斷其個股趨勢。
+          * 結合 [當前市場概況]，目前是否為一個技術面上【風險報酬比較佳】的波段進場或加碼時機？
 
-      4.  **【市場情緒與動態 (Market Sentiment & Momentum)】**:
-          * 綜合「新聞情緒分數」、「法人買賣超」與「成交量變化」，判斷市場當前對這支股票的【短期】情緒是偏向樂觀、悲觀還是中性？這種情緒是否有基本面支撐？    
-
-      5.  **【綜合策略建議】**:
-         * 總結以上分析，給我一個明確的投資策略。例如：「建議在 XXX 價位附近開始分批佈局，目標是 XXX，停損點設在季線下方。」
+      4.  **【綜合策略建議】**:
+         * 總結以上分析，給我一個明確的投資策略。
+         * 請說明你認為「現在」應該採取的行動（例如：開始分批買入、保持觀察、逢高減碼），並提供支持你結論的核心理由。
+         * 例如：「建議在 XXX 價位附近開始分批佈局，目標是 XXX，停損點設在季線下方。」
         
       ★★★ 關鍵指令：請在以上 1, 2, 3, 4, 5 每一個要點分析結束後，都必須加上一行獨立的 "---###---" 作為分隔符。★★★
       ---
@@ -2672,6 +2741,82 @@ function updateConsecutiveBuyDays_Single(rowData, headers, ticker) {
 }
 
 
+// 每日讀取大盤日誌，計算市場狀態，供 AI 參考
+function updateMarketIndicators() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName('大盤日誌');
+  const indicatorSheet = ss.getSheetByName('市場指標');
+
+  if (!logSheet || !indicatorSheet) {
+    Logger.log("❌ 找不到「大盤日誌」或「市場指標」工作表，無法更新市場狀態。");
+    return;
+  }
+
+  let closingPrices = [];
+  const MIN_DAYS = 61; // 至少需要61筆數據來計算 MA60
+  const data = logSheet.getDataRange().getValues();
+
+  if (data.length < MIN_DAYS) {
+    // --- 冷啟動模式：日誌數據不足，從 API 即時抓取歷史數據 ---
+    Logger.log(`⚠️ 大盤日誌數據不足 ${MIN_DAYS} 筆，啟用 API 歷史回補模式...`);
+    
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - 90); // 抓取過去90天的數據以確保有超過60個交易日
+    const startDateStr = Utilities.formatDate(startDate, "Asia/Taipei", "yyyy-MM-dd");
+    
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=TAIEX&start_date=${startDateStr}&token=${FINMIND_API_TOKEN}`;
+    try {
+      const res = UrlFetchApp.fetch(url, {'muteHttpExceptions': true});
+      const json = JSON.parse(res.getContentText());
+      if (json.data && json.data.length >= MIN_DAYS) {
+        closingPrices = json.data.map(item => item.close);
+        Logger.log(`✅ 成功從 API 獲取 ${closingPrices.length} 筆大盤歷史收盤價。`);
+      } else {
+        Logger.log(`❌ 從 API 獲取大盤歷史數據失敗或數據不足。`);
+        return; // 獲取失敗則中止
+      }
+    } catch (e) {
+      Logger.log(`❌ 呼叫大盤歷史資料 API 時發生錯誤: ${e}`);
+      return;
+    }
+  } else {
+    // --- 正常模式：使用日誌數據 ---
+    Logger.log("ℹ️ 大盤日誌數據充足，使用日誌進行計算。");
+    closingPrices = data.slice(1).map(row => row[1]); 
+  }
+
+  const latestClose = closingPrices[closingPrices.length - 1];
+
+  const calculateMA = (prices, days) => {
+    if (prices.length < days) return null;
+    const relevantPrices = prices.slice(-days);
+    const sum = relevantPrices.reduce((acc, price) => acc + price, 0);
+    return (sum / days).toFixed(2);
+  };
+
+  const ma20 = calculateMA(closingPrices, 20);
+  const ma60 = calculateMA(closingPrices, 60);
+
+  let marketStatus = "盤整震盪";
+  if (latestClose > ma20 && ma20 > ma60) {
+    marketStatus = "強勢多頭，位於月線之上";
+  } else if (latestClose < ma20 && ma20 < ma60) {
+    marketStatus = "空頭趨勢，位於所有均線之下";
+  } else if (latestClose > ma60) {
+    marketStatus = "中期偏多，站上季線";
+  } else {
+    marketStatus = "中期偏空，跌破季線";
+  }
+  
+  indicatorSheet.getRange("B2").setValue(latestClose);
+  indicatorSheet.getRange("B3").setValue(ma20);
+  indicatorSheet.getRange("B4").setValue(ma60);
+  indicatorSheet.getRange("B5").setValue(marketStatus);
+
+  Logger.log(`✅ 市場指標已更新！目前狀態: ${marketStatus}`);
+  return marketStatus;
+}
 
 
 
