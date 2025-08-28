@@ -1811,66 +1811,77 @@ function checkCustomAlerts() {
 }
 
 //智慧大腦：條件解析器
+//【智慧大腦 v2.0】：條件解析器 (支援括號與 AND/OR 邏輯)
 function parseAndCheckConditions(conditionsString, headers, row) {
-  // 步驟 1: 先用 "OR" (||) 分隔，拆解成多個「條件組合」
-  const conditionGroups = conditionsString.split('||').map(g => g.trim());
+  // 步驟 1: 優先用 "AND" (;) 分隔，拆解成多個「主要條件」
+  const primaryConditions = conditionsString.split(';').map(c => c.trim());
+  let allPrimaryConditionsMet = true;
+  let triggerDetails = "";
 
-  // 步驟 2: 遍歷每一個「條件組合」
-  for (const group of conditionGroups) {
-    const conditionsInGroup = group.split(';').map(c => c.trim());
-    let allConditionsInGroupMet = true; // 假設這個組合內的所有條件都滿足
-    let triggerDetails = ""; // 用來記錄這個組合的觸發細節
+  // 步驟 2: 遍歷每一個「主要條件」
+  for (const condition of primaryConditions) {
+    let isThisConditionMet = false; // 預設這個主要條件不滿足
 
-    // 步驟 3: 在單一組合內，檢查每一個 "AND" 條件
-    for (const condition of conditionsInGroup) {
-      const match = condition.match(/(.+?)(>=|<=|>|<|=)(.+)/);
-      if (!match) continue;
-
-      const fieldName = match[1].trim();
-      const operator = match[2].trim();
-      const targetValue = match[3].trim();
+    // 步驟 3: 檢查這個主要條件是否為一個「OR 組合」(包含括號和 ||)
+    // 範例: (投信連買天數 >= 2 || 外資連買天數 >= 2)
+    // 範例: 均線排列 = (多頭排列||盤整)
+    if (condition.includes('||') && condition.includes('(') && condition.includes(')')) {
+      // 这是一个 OR 组合
+      const fieldName = condition.split('=')[0].trim();
+      const orContent = condition.substring(condition.indexOf('(') + 1, condition.indexOf(')'));
+      const orOptions = orContent.split('||').map(opt => opt.trim());
       
       const colIndex = headers.indexOf(fieldName);
-      if (colIndex === -1) {
-        allConditionsInGroupMet = false;
-        break; 
+      if (colIndex !== -1) {
+        const actualValue = String(row[colIndex]).trim();
+        // 只要 OR 選項中有任何一個符合，這個條件就滿足
+        if (orOptions.includes(actualValue)) {
+          isThisConditionMet = true;
+          triggerDetails += `• ${fieldName}: ${actualValue} (✅ 符合 OR 條件: ${orContent})\n`;
+        } else {
+          triggerDetails += `• ${fieldName}: ${actualValue} (❌ 不符 OR 條件: ${orContent})\n`;
+        }
       }
+    } else {
+      // 這是一個普通的「單一條件」
+      const match = condition.match(/(.+?)(>=|<=|>|<|=)(.+)/);
+      if (match) {
+        const fieldName = match[1].trim();
+        const operator = match[2].trim();
+        const targetValueStr = match[3].trim();
+        
+        const colIndex = headers.indexOf(fieldName);
+        if (colIndex !== -1) {
+          let actualValue = row[colIndex];
+          const isTargetNumeric = !isNaN(parseFloat(targetValueStr));
 
-      let actualValue = row[colIndex];
-      let isMet = false;
-      const isTargetNumeric = !isNaN(parseFloat(targetValue));
-      
-      if (isTargetNumeric) {
-        actualValue = parseFloat(actualValue);
-        let numericTarget = parseFloat(targetValue);
-        if (operator === '>') isMet = actualValue > numericTarget;
-        else if (operator === '<') isMet = actualValue < numericTarget;
-        else if (operator === '>=') isMet = actualValue >= numericTarget;
-        else if (operator === '<=') isMet = actualValue <= numericTarget;
-        else if (operator === '=') isMet = actualValue == numericTarget;
-      } else {
-        if (operator === '=') isMet = String(actualValue).trim() == targetValue;
-      }
-      
-      // 將這個條件的觸發細節記錄下來
-      triggerDetails += `• ${fieldName}: ${actualValue} (條件: ${operator}${targetValue})\n`;
-      
-      if (!isMet) {
-        allConditionsInGroupMet = false; // 只要有一個條件不滿足...
-        break; // ...就立刻判定這個組合失敗，跳到下一個組合
+          if (isTargetNumeric) {
+            actualValue = parseFloat(actualValue);
+            let numericTarget = parseFloat(targetValueStr);
+            if (operator === '>') isThisConditionMet = actualValue > numericTarget;
+            else if (operator === '<') isThisConditionMet = actualValue < numericTarget;
+            else if (operator === '>=') isThisConditionMet = actualValue >= numericTarget;
+            else if (operator === '<=') isThisConditionMet = actualValue <= numericTarget;
+            else if (operator === '=') isThisConditionMet = actualValue == numericTarget;
+          } else {
+            if (operator === '=') isThisConditionMet = String(actualValue).trim() == targetValueStr;
+          }
+          
+          const statusIcon = isThisConditionMet ? '✅' : '❌';
+          triggerDetails += `• ${fieldName}: ${actualValue} (${statusIcon} 條件: ${operator}${targetValueStr})\n`;
+        }
       }
     }
 
-    // 步驟 4: 如果在檢查完一個組合後，它內部的所有條件都還滿足...
-    if (allConditionsInGroupMet) {
-      // ...那麼就代表 "OR" 邏輯被觸發了！我們不需要再檢查後面的組合了。
-      Logger.log(`✅ 條件組合 "${group}" 被觸發！`);
-      return { isMet: true, details: triggerDetails }; // 立刻回報成功！
+    // 步驟 4: 如果有任何一個「主要條件」不滿足，整個警報就失敗
+    if (!isThisConditionMet) {
+      allPrimaryConditionsMet = false;
+      break; // 立刻停止檢查後續條件
     }
   }
 
-  // 如果遍歷完所有的組合，都沒有任何一個被觸發，才回報失敗。
-  return { isMet: false, details: "" };
+  // 只有在所有「主要條件」都滿足時，才回報成功
+  return { isMet: allPrimaryConditionsMet, details: triggerDetails };
 }
 
 //輔助函式：呼叫 Perplexity 並回傳分析結果
