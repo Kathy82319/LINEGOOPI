@@ -365,7 +365,7 @@ function updateStockPriceAndVolumeFromFinMind() {
   
   // 原料
   const sharesOutstandingCol = headers.indexOf('在外流通股數');
-  const revenueCol = headers.indexOf('營業收入');
+  const revenueCol = headers.indexOf('營業收入 (近四季)'); // ★ 修正：應使用近四季營收來計算 P/S Ratio
   const ttmEpsCol = headers.indexOf('EPS (近四季)');
   const equityCol = headers.indexOf('股東權益總額');
 
@@ -410,26 +410,31 @@ function updateStockPriceAndVolumeFromFinMind() {
       let sps = 0; // Sales Per Share (每股營收)
       let bvps = 0; // Book Value Per Share (每股淨值)
       
-      if (spsCol !== -1 && revenueCol !== -1 && shares && !isNaN(shares) && shares !== 0) {
-        const revenue = data[i][revenueCol];
-        if (revenue && !isNaN(revenue)) {
-          sps = revenue / shares;
+      // 計算每股營收 (SPS)
+      if (spsCol !== -1 && revenueCol !== -1 && shares && !isNaN(shares) && shares > 0) {
+        const ttmRevenue = data[i][revenueCol];
+        if (ttmRevenue && !isNaN(ttmRevenue)) {
+          // ★ 關鍵修正：營收單位是千元，需乘以 1000
+          sps = (ttmRevenue * 1000) / shares;
           data[i][spsCol] = sps.toFixed(2);
         } else {
           data[i][spsCol] = '無法計算';
         }
       }
       
-      if (bvpsCol !== -1 && equityCol !== -1 && shares && !isNaN(shares) && shares !== 0) {
+      // 計算每股淨值 (BVPS)
+      if (bvpsCol !== -1 && equityCol !== -1 && shares && !isNaN(shares) && shares > 0) {
         const equity = data[i][equityCol];
         if (equity && !isNaN(equity)) {
-          bvps = equity / shares;
+          // ★★★ 核心修正：股東權益單位是千元，需乘以 1000 ★★★
+          bvps = (equity * 1000) / shares;
           data[i][bvpsCol] = bvps.toFixed(2);
         } else {
           data[i][bvpsCol] = '無法計算';
         }
       }
 
+      // 計算本益比 (P/E Ratio)
       if (peRatioCol !== -1 && ttmEpsCol !== -1) {
         const ttmEps = data[i][ttmEpsCol];
         if (price > 0 && ttmEps && !isNaN(ttmEps) && ttmEps > 0) {
@@ -439,12 +444,14 @@ function updateStockPriceAndVolumeFromFinMind() {
         }
       }
 
+      // 計算股價淨值比 (P/B Ratio)
       if (pbRatioCol !== -1 && bvps > 0) {
         data[i][pbRatioCol] = (price / bvps).toFixed(2);
       } else if (pbRatioCol !== -1) {
         data[i][pbRatioCol] = '無法計算';
       }
 
+      // 計算股價營收比 (P/S Ratio)
       if (psRatioCol !== -1 && sps > 0) {
         data[i][psRatioCol] = (price / sps).toFixed(2);
       } else if (psRatioCol !== -1) {
@@ -1783,35 +1790,6 @@ function generateDailyRiskReport() {
   Logger.log(`✅ 風控報告已更新至「${reportSheetName}」工作表。`);
 }
 
-//GPT推送至LINE(把組合好的訊息，交給郵差去寄送)
-function pushToLINEforGAS(messageText, lineToken, lineUserId) {
-  const apiUrl = "https://api.line.me/v2/bot/message/push";
-  const requestBody = { to: lineUserId, messages: [{ type: "text", text: messageText }] };
-
-  const params = {
-    method: 'post',
-    headers: { 'Authorization': 'Bearer ' + lineToken },
-    contentType: 'application/json',
-    payload: JSON.stringify(requestBody),
-    muteHttpExceptions: true
-  };
-
-  Logger.log("準備發送 LINE 推播請求...");
-  const response = UrlFetchApp.fetch(apiUrl, params);
-
-  const responseCode = response.getResponseCode();
-  const responseBody = response.getContentText();
-
-  Logger.log("------------------------------------");
-  Logger.log("LINE API 回應代碼 (Response Code): " + responseCode);
-  Logger.log("LINE API 回應內容 (Response Body): " + responseBody);
-  Logger.log("------------------------------------");
-
-  if (responseCode !== 200) {
-    throw new Error("LINE Push API 請求失敗，請查看上方日誌。");
-  }
-}
-
 // 輔助函式：為指定股票搜尋最新的3則財經新聞標題
 function fetchNewsForStock_forGAS(ticker, name) {
   // 注意：Google Apps Script 沒有內建的 Google 搜尋函式庫。
@@ -2698,7 +2676,6 @@ function updateStockPrice_Single(rowData, headers, ticker) {
     const price = latestPriceData.price;
     const ttmEps = parseFloat(rowData[colMap['EPS (近四季)']]);
     const shares = parseFloat(rowData[colMap['在外流通股數)']]);
-    // ... 此處省略完整的估值計算，您可以從 updateStockPriceAndVolumeFromFinMind 函式中複製過來 ...
     rowData[colMap['今日股價']] = price;
     if (ttmEps > 0) rowData[colMap['本益比']] = (price / ttmEps).toFixed(2);
   }
