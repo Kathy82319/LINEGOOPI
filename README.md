@@ -1267,7 +1267,7 @@ function calculateStreak(sortedHistory, investorType) {
   return isBuyingStreak ? streak : -streak; // 賣超回傳負數
 }
 
-//【技術分析模組】：10日均量、均線排列、是否突破前高、是否跌破支撐
+//【技術分析模組】：10日均量、均線排列、是否突破前高、是否跌破支撐、MA20、MA60
 function updateTechnicalIndicators() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('風控報表');
   if (!sheet) {
@@ -1282,11 +1282,14 @@ function updateTechnicalIndicators() {
   const tickerCol = headers.indexOf('股票代碼');
   const avgVolumeCol = headers.indexOf('近10日均量');
   const maStateCol = headers.indexOf('均線排列');
-  const breakthroughCol = headers.indexOf('是否突破前高'); // ★ 新增欄位
-  const breakdownCol = headers.indexOf('是否跌破支撐');   // ★ 新增欄位
+  const breakthroughCol = headers.indexOf('是否突破前高');
+  const breakdownCol = headers.indexOf('是否跌破支撐');
+  // ★★★ 新增欄位索引 ★★★
+  const ma20Col = headers.indexOf('MA20');
+  const ma60Col = headers.indexOf('MA60');
   
-  if (tickerCol === -1 || avgVolumeCol === -1 || maStateCol === -1 || breakthroughCol === -1 || breakdownCol === -1) {
-    Logger.log('❌ 執行中止：找不到必要的技術指標欄位，請檢查標題。');
+  if (tickerCol === -1) {
+    Logger.log('❌ 執行中止：找不到「股票代碼」欄位。');
     return;
   }
 
@@ -1295,56 +1298,45 @@ function updateTechnicalIndicators() {
     const ticker = data[i][tickerCol];
     if (!ticker) continue;
     
-    // 呼叫升級後的輔助函式，一次取得所有計算結果
     const indicators = fetchAndCalculateTechIndicators(ticker);
     
     if (indicators) {
-      // 寫入近10日均量
-      data[i][avgVolumeCol] = Math.round(indicators.avgVolume10); 
+      if(avgVolumeCol !== -1) data[i][avgVolumeCol] = Math.round(indicators.avgVolume10); 
       
-      // 判斷均線排列
       const { ma5, ma20, ma60, high60, prevClose, todayClose } = indicators;
-      if (ma5 && ma20 && ma60) {
-        if (ma5 > ma20 && ma20 > ma60) {
-          data[i][maStateCol] = '多頭排列';
-        } else if (ma5 < ma20 && ma20 < ma60) {
-          data[i][maStateCol] = '空頭排列';
+
+      // ★★★ 新增：寫入 MA20 和 MA60 的實際數值 ★★★
+      if(ma20Col !== -1) data[i][ma20Col] = ma20 ? ma20.toFixed(2) : '資料不足';
+      if(ma60Col !== -1) data[i][ma60Col] = ma60 ? ma60.toFixed(2) : '資料不足';
+
+      if (maStateCol !== -1) {
+        if (ma5 && ma20 && ma60) {
+          if (ma5 > ma20 && ma20 > ma60) data[i][maStateCol] = '多頭排列';
+          else if (ma5 < ma20 && ma20 < ma60) data[i][maStateCol] = '空頭排列';
+          else data[i][maStateCol] = '盤整';
         } else {
-          data[i][maStateCol] = '盤整';
+          data[i][maStateCol] = '資料不足';
         }
-      } else {
-        data[i][maStateCol] = '資料不足';
       }
 
-      // ★★★ 新增：判斷是否突破前高 ★★★
-      if (high60 && todayClose) {
-        if (todayClose >= high60) {
-          data[i][breakthroughCol] = '是';
-        } else {
-          data[i][breakthroughCol] = '否';
-        }
-      } else {
-        data[i][breakthroughCol] = '資料不足';
+      if (breakthroughCol !== -1) {
+        if (high60 && todayClose) data[i][breakthroughCol] = (todayClose >= high60) ? '是' : '否';
+        else data[i][breakthroughCol] = '資料不足';
       }
       
-      // ★★★ 新增：判斷是否跌破支撐 ★★★
-      if (ma60 && todayClose && prevClose) {
-        // 條件：昨天收盤還在季線之上，但今天收盤掉到季線之下
-        if (prevClose >= ma60 && todayClose < ma60) {
-          data[i][breakdownCol] = '是';
-        } else {
-          data[i][breakdownCol] = '否';
-        }
-      } else {
-        data[i][breakdownCol] = '資料不足';
+      if (breakdownCol !== -1) {
+        if (ma60 && todayClose && prevClose) data[i][breakdownCol] = (prevClose >= ma60 && todayClose < ma60) ? '是' : '否';
+        else data[i][breakdownCol] = '資料不足';
       }
       
     } else {
       // 如果資料不足，將所有相關欄位都標示
-      data[i][avgVolumeCol] = '資料不足';
-      data[i][maStateCol] = '資料不足';
-      data[i][breakthroughCol] = '資料不足';
-      data[i][breakdownCol] = '資料不足';
+      if(avgVolumeCol !== -1) data[i][avgVolumeCol] = '資料不足';
+      if(maStateCol !== -1) data[i][maStateCol] = '資料不足';
+      if(breakthroughCol !== -1) data[i][breakthroughCol] = '資料不足';
+      if(breakdownCol !== -1) data[i][breakdownCol] = '資料不足';
+      if(ma20Col !== -1) data[i][ma20Col] = '資料不足';
+      if(ma60Col !== -1) data[i][ma60Col] = '資料不足';
     }
   }
 
@@ -2013,7 +2005,7 @@ function handleTextMessage(message, replyToken, userId) {
 }
 
 
-//產生單一個股的深度分析報告
+//【AI 大腦】產生單一個股或 ETF 的深度分析報告 (v2.0 - 智慧升級版)
 function generateSingleStockReport(tickerOrName) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2028,9 +2020,7 @@ function generateSingleStockReport(tickerOrName) {
     let stockInfo = {};
     let stockCode = "";
     let name = "";
-    let source = ""; // 標記資料來源
 
-    // 步驟 1: 嘗試從「風控報表」中尋找資料
     for (let i = 1; i < data.length; i++) {
       if (data[i][tickerCol] == tickerOrName || data[i][nameCol] == tickerOrName) {
         stockDataRow = data[i];
@@ -2038,83 +2028,81 @@ function generateSingleStockReport(tickerOrName) {
       }
     }
 
-    // 步驟 2: 判斷資料來源
-    if (stockDataRow) {
-      // --- 狀況 A: 股票在報表中，使用表內現有數據 ---
-      source = "來自您的風控報表";
-      Logger.log(`在風控報表中找到 ${tickerOrName}，使用表內資料進行分析。`);
-      stockCode = stockDataRow[tickerCol];
-      name = stockDataRow[nameCol];
-      
-      const relevantHeaders = [
-        '今日股價', '本益比', '股價淨值比', '營收 YoY', 'EPS YoY', '現金股利', 
-        '殖利率', '連續配息年數', 'EPS (近四季)', '外資連買天數', '投信連買天數', 
-        '歷史本益比位階(%)', '均線排列', '是否突破前高', '是否跌破支撐', '近期新聞情緒分數'
-      ];
-      relevantHeaders.forEach(header => {
-        const index = headers.indexOf(header);
-        if(index !== -1){
-            stockInfo[header] = stockDataRow[index];
-        }
-      });
-
-    } else {
-      // --- 狀況 B: 股票不在報表中，啟用即時線上抓取模式 ---
-      source = "即時線上查詢";
-      stockCode = tickerOrName; // 假設使用者輸入的是代碼
-      Logger.log(`風控報表中找不到 ${stockCode}，啟用即時線上抓取模式。`);
-      
-      // ★ 執行即時資料抓取 (這是一個我們需要新增的輔助函式)
-      stockInfo = fetchRealTimeStockData(stockCode);
-      
-      if (!stockInfo || !stockInfo.股票名稱) {
-        return `錯誤：無法查詢到股票 "${stockCode}" 的即時資料，請確認股票代碼是否正確。`;
-      }
-      name = stockInfo.股票名稱;
-    }
-
-    // 步驟 3: 組合 Prompt 並呼叫 AI
-    const newsTitles = fetchNewsForStock_forGAS(stockCode, name);
-    let promptFooter = `\n\n分析完畢。`;
     if (!stockDataRow) {
-        promptFooter = `\n\n---
-        **操作提示**: 此股票目前不在您的追蹤清單中。若分析後您想將其納入每日追蹤，請直接傳送指令：\n"加入 ${stockCode}"`;
+      return `錯誤：在風控報表中找不到 "${tickerOrName}"，請先將其加入報表才能進行分析。`;
     }
 
-    const prompt = `
-      你是一位專注於【中長期價值投資】與【波段操作】的基金經理人。
+    stockCode = stockDataRow[tickerCol];
+    name = stockDataRow[nameCol];
+    
+    // 將一整列的數據都打包給 AI
+    headers.forEach((header, index) => {
+      if (header && stockDataRow[index]) { // 只打包有標題且有值的欄位
+        stockInfo[header] = stockDataRow[index];
+      }
+    });
 
-      請為我深度分析 "${name} (${stockCode})" 這檔個股，你的報告需要像一份給投資委員會的內部決策備忘錄，並包含以下四點：
+    // ★★★ 智慧開關：判斷是 ETF 還是個股，並選擇對應的 prompt ★★★
+    const isETF = stockCode.startsWith("00"); 
+    let prompt = "";
 
-      1.  **【長期持有價值評估】**:
-         * 從「連續配息年數」、「殖利率」、「EPS (近四季)」等數據，評估這家公司是否具備【穩定獲利】的體質，值得長期持有？
-         * 它的「歷史本益比位階」目前在哪個區間？這對長期投資者意味著什麼？
+    if (isETF) {
+      // --- 使用 ETF 專屬的宏觀分析 Prompt ---
+      prompt = `
+        你是一位專精於指數化投資 (ETF) 的資產配置顧問。
+        你的分析核心是【順大勢，逆小勢】，旨在透過紀律的技術指標，在中長期的多頭趨勢中，找到風險報酬比較佳的分批佈局點。
+        請為我分析 "${name} (${stockCode})" 這檔 ETF，並包含以下三點：
 
-      2.  **【中期成長動能分析】**:
-          * 結合「營收YoY」、「EPS YoY」與最新的新聞情緒，判斷公司目前是處於【成長加速】、【成長趨緩】還是【衰退】的階段？
+        1.  **【當前趨勢定位】**:
+            * 從「均線排列」判斷，這檔 ETF 目前處於【長期多頭】、【長期空頭】還是【盤整】階段？這決定了我們當前的核心策略應該是偏多、偏空還是觀望。
 
-      3.  **【波段操作技術面觀察】**:
-          * 從「均線排列」、「是否突破前高/跌破支撐」等指標，判斷目前是否為一個【適合進場】的波段操作時機點？還是應該【觀望或減碼】？
+        2.  **【技術面買點評估 (分批佈局)】**:
+            * **第一機會區 (月線)**: 目前的「今日股價」是否已經回檔至「MA20 (月線)」附近？這是否構成一個健康的、強勢整理後的首個佈局點？
+            * **第二機會區 (季線)**: 目前的「今日股價」與「MA60 (季線)」的距離有多遠？季線是中長期趨勢的生命線，如果價格進一步回檔至此，是否會是一個更具安全邊際的加碼點？
 
-      4.  **【市場情緒與動態 (Market Sentiment & Momentum)】**:
-          * 綜合「新聞情緒分數」、「法人買賣超」與「成交量變化」，判斷市場當前對這支股票的【短期】情緒是偏向樂觀、悲觀還是中性？這種情緒是否有基本面支撐？    
+        3.  **【綜合策略建議 (紀律執行)】**:
+            * 總結以上分析，明確建議「現在」應該採取的行動。例如：「目前為多頭排列下的首次回測月線，建議可開始第一批資金佈局」、「價格仍在月線之上，建議耐心等待回檔至 MA20 或 MA60 附近再行操作」、「已跌破季線，趨勢轉弱，建議保持觀望」。
+            * **請務必提供明確的參考價位** (例如：MA20 約在 $XX.X 元，MA60 約在 $XX.X 元)。
+            
+        ---
+        [輸入資料]
+        ETF 量化數據: ${JSON.stringify(stockInfo, null, 2)}
+        ---
+      `;
+    } else {
+      // --- 使用個股專屬的價值波段分析 Prompt (升級版) ---
+      prompt = `
+        你是一位專注於【中長期價值投資】與【波段操作】的基金經理人。
+        你的分析需要結合個股基本面與技術面，提供一份專業、多維度的決策備忘錄。
+        請為我深度分析 "${name} (${stockCode})" 這檔個股，你的報告需要包含以下四點：
 
-      5.  **【綜合策略建議】**:
-         * 總結以上分析，給我一個明確的投資策略。例如：「建議在 XXX 價位附近開始分批佈局，目標是 XXX，停損點設在季線下方。」
+        1.  **【價值與成長性評估 (選股)】**:
+            * **價值面**: 從「歷史本益比位階」、「連續配息年數」與「殖利率」來看，目前估值是否具備安全邊際？
+            * **成長面**: 結合「營收YoY」、「EPS YoY」，判斷公司的中期成長動能是否強勁？
+
+        2.  **【市場情緒與籌碼 (短期線索)】**:
+            * 綜合「近期新聞情緒分數」以及「投信/外資連買天數」，判斷市場短期對它的情緒與主力籌碼的態度是偏多還是偏空？
+
+        3.  **【技術面操作點位 (擇時)】**:  <--- ★★★ 這裡是本次升級的重點 ★★★
+            * **趨勢判斷**: 從「均線排列」判斷其個股的長線趨勢。
+            * **機會點評估**: 目前的「今日股價」與「MA20 (月線)」及「MA60 (季線)」的相對位置如何？請判斷現在是處於【突破追價】的階段，還是【健康回檔至支撐】的佈局機會？**這是一個追高的位置，還是一個可以安心佈局的位置？**
+
+        4.  **【綜合策略建議 (決策)】**:
+            * 總結以上所有分析，給我一個明確的投資策略。
+            * 請說明你認為「現在」應該採取的行動（例如：開始分批買入、保持觀察等待回檔至 MA20、逢高減碼），並提供支持你結論的核心理由，**最好能結合明確的參考價位 (MA20/MA60)**。
         
-      ★★★ 關鍵指令：請在以上 1, 2, 3, 4, 5 每一個要點分析結束後，都必須加上一行獨立的 "---###---" 作為分隔符。★★★
-      ---
-      [輸入資料]
-      資料來源: ${source}
-      量化數據: ${JSON.stringify(stockInfo, null, 2)}
-      最新新聞標題: ${newsTitles}
-      ${promptFooter}
+        ---
+        [輸入資料]
+        個股量化數據: ${JSON.stringify(stockInfo, null, 2)}
+        ---
        `;
+    }
 
     const properties = PropertiesService.getScriptProperties();
     const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY');
     if (!perplexityApiKey) return "錯誤：未設定 Perplexity API Key。";
     
+    // 呼叫 AI (我們將報告切分的功能移到 handleTextMessage 中)
     return callPerplexity_forGAS(prompt, perplexityApiKey);
 
   } catch (err) {
