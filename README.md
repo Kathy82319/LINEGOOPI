@@ -1696,31 +1696,63 @@ function generateDailyRiskReport() {
 }
 
 //GPT推送至LINE(把組合好的訊息，交給郵差去寄送)
-function pushToLINEforGAS(messageText, lineToken, lineUserId) {
-  const apiUrl = "https://api.line.me/v2/bot/message/push";
-  const requestBody = { to: lineUserId, messages: [{ type: "text", text: messageText }] };
+//【防彈級 v2.0】專門用於「推送長訊息」的 Push 函式
+function pushToLINEforGAS(messages, userId) {
+  const url = "https://api.line.me/v2/bot/message/push";
+  const properties = PropertiesService.getScriptProperties();
+  const lineToken = properties.getProperty('LINE_CHANNEL_TOKEN');
+  if (!lineToken || !userId) {
+    Logger.log("❌ LINE Token 或 User ID 未設定，無法發送。");
+    return;
+  }
+  
+  let messageObjects = [];
+  
+  if (Array.isArray(messages)) {
+    // ★ 升級點：自動過濾掉空字串，並確保內容是字串
+    messageObjects = messages
+      .map(text => String(text).trim())
+      .filter(text => text.length > 0)
+      .map(text => ({ type: 'text', text: text }));
+  } else if (typeof messages === 'string' && messages.trim().length > 0) {
+    messageObjects = [{ type: 'text', text: messages.trim() }];
+  }
 
-  const params = {
+  if (messageObjects.length === 0) {
+    Logger.log("ℹ️ 過濾後沒有需要發送的訊息。");
+    return;
+  }
+  
+  // LINE API 一次最多只能發送 5 則
+  if (messageObjects.length > 5) {
+      messageObjects = messageObjects.slice(0, 5);
+      Logger.log("⚠️ 訊息超過 5 則，已自動截斷為前 5 則。");
+  }
+
+  const payload = {
+    to: userId,
+    messages: messageObjects
+  };
+
+  const options = {
     method: 'post',
     headers: { 'Authorization': 'Bearer ' + lineToken },
     contentType: 'application/json',
-    payload: JSON.stringify(requestBody),
-    muteHttpExceptions: true
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true // ★ 核心：設為 true，讓程式絕不因 API 錯誤而崩潰
   };
-
-  Logger.log("準備發送 LINE 推播請求...");
-  const response = UrlFetchApp.fetch(apiUrl, params);
-
+  
+  const response = UrlFetchApp.fetch(url, options);
   const responseCode = response.getResponseCode();
   const responseBody = response.getContentText();
 
-  Logger.log("------------------------------------");
-  Logger.log("LINE API 回應代碼 (Response Code): " + responseCode);
-  Logger.log("LINE API 回應內容 (Response Body): " + responseBody);
-  Logger.log("------------------------------------");
-
+  // ★ 升級點：檢查 LINE 的回覆，如果不是 200 (成功)，就記錄詳細的官方錯誤
   if (responseCode !== 200) {
-    throw new Error("LINE Push API 請求失敗，請查看上方日誌。");
+    Logger.log(`🚨 LINE Push API 請求失敗！ 🚨`);
+    Logger.log(`HTTP 狀態碼: ${responseCode}`);
+    Logger.log(`LINE 官方錯誤訊息: ${responseBody}`);
+  } else {
+    Logger.log("✅ LINE Push API 訊息發送成功。");
   }
 }
 
@@ -1964,63 +1996,97 @@ function callPerplexity_forGAS(prompt, apiKey) {
 
 // LINE 互動查詢核心 ★★★
 //Webhook 主入口：這是 Google 執行 Web App 的標準進入點。
+//【黑盒子偵錯版 v1.0】Webhook 主入口
 function doPost(e) {
-  if (e === undefined || e.postData === undefined || e.postData.contents === undefined) {
-    return ContentService.createTextOutput("Invalid request").setMimeType(ContentService.MimeType.TEXT);
-  }
-  const events = JSON.parse(e.postData.contents).events;
-  events.forEach(function(event) {
-    if (event.type === "message" && event.message.type === "text") {
-      const userMessage = event.message.text;
-      const replyToken = event.replyToken;
-      const userId = event.source.userId;
-      handleTextMessage(userMessage, replyToken, userId);
+  // ★★★ 黑盒子紀錄器安裝處 ★★★
+  try {
+    // --- 程式正常邏輯開始 ---
+    if (e === undefined || e.postData === undefined || e.postData.contents === undefined) {
+      // 如果請求本身就有問題，也記錄下來
+      throw new Error("Invalid POST request: 'e' or 'postData' is undefined.");
     }
-  });
-  return ContentService.createTextOutput(JSON.stringify({'status':'ok'})).setMimeType(ContentService.MimeType.JSON);
+    
+    const events = JSON.parse(e.postData.contents).events;
+    
+    events.forEach(function(event) {
+      if (event.type === "message" && event.message.type === "text") {
+        const userMessage = event.message.text;
+        const replyToken = event.replyToken;
+        const userId = event.source.userId;
+        
+        // 正常呼叫您的訊息處理器
+        handleTextMessage(userMessage, replyToken, userId);
+      }
+    });
+    
+    // 正常執行完畢，回傳 OK
+    return ContentService.createTextOutput(JSON.stringify({'status':'ok'})).setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    // ★★★ 墜機報告產生器 ★★★
+    // 無論發生任何災難性的錯誤，程式都會跳到這裡
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName("Error_Log");
+    
+    // 準備一份詳細的墜機報告
+    const errorReport = [
+      new Date(), // 錯誤發生的時間
+      "FATAL_ERROR in doPost", // 錯誤類型
+      err.name, // 錯誤名稱 (e.g., ReferenceError)
+      err.message, // 錯誤訊息
+      err.stack, // 錯誤的詳細堆疊追蹤 (最重要！)
+      JSON.stringify(e) // 將收到的原始 LINE 請求也記錄下來
+    ];
+    
+    // 將報告寫入「黑盒子」工作表
+    if (logSheet) {
+      logSheet.appendRow(errorReport);
+    }
+    
+    // 即使發生錯誤，也盡可能回傳一個東西給 LINE 伺服器，避免它重複發送
+    return ContentService.createTextOutput(JSON.stringify({'status':'error', 'message': err.message})).setMimeType(ContentService.MimeType.JSON);
+  }
 }
 
 
-// 訊息處理核心 (指令路由器)
+//【最終偵錯版】訊息處理核心 (安裝了現場回報系統)
 function handleTextMessage(message, replyToken, userId) {
   const trimmedMessage = message.trim();
 
-  // --- 指令 1: 分析個股 (最常用) ---
+  // --- 指令 1: 分析個股 ---
   const analyzeMatch = trimmedMessage.match(/^(分析|查詢)\s*([\w\d\u4e00-\u9fa5]+)$/);
   if (analyzeMatch) {
     const tickerOrName = analyzeMatch[2];
     Logger.log(`接收到分析指令，目標: ${tickerOrName}`);
     replyToLINE(replyToken, `收到請求，正在為您深度分析「${tickerOrName}」，請稍候...`);
     
-    // 步驟 1: 正常產生完整報告
+    // 正常執行分析
     const reportText = generateSingleStockReport(tickerOrName);
     
-    // ★ 步驟 2: 使用分隔符將報告切分成陣列
-    const reportParts = reportText.split('---###---').map(part => part.trim()).filter(part => part.length > 0);
-
-    // 步驟 3: 將切分好的陣列交給升級後的 push 函式進行分段發送
-    pushMultipleMessagesToLINE(reportParts, userId);
+    // ★ 升級點：將報告切分後，直接交給防彈級的 push 函式處理
+    const reportParts = reportText.split('---###---');
+    pushToLINEforGAS(reportParts, userId);
+    
     return;
   }
   
-  // --- 指令 2: 新增股票至風控報表 ---
+  // --- 指令 2: 新增股票 ---
   const addMatch = trimmedMessage.match(/^(加入|新增)\s*([\w\d]+)$/);
   if (addMatch) {
-    const ticker = addMatch[2];
-    Logger.log(`接收到新增指令，目標: ${ticker}`);
-    replyToLINE(replyToken, `好的，正在將「${ticker}」加入到您的風控報表中...`);
-    const resultMessage = addStockToReport(ticker);
+      const ticker = addMatch[2];
+      Logger.log(`接收到新增指令，目標: ${ticker}`);
+      replyToLINE(replyToken, `好的，正在將「${ticker}」加入到您的風控報表中...`);
+      const resultMessage = addStockToReport(ticker);
 
-    if (resultMessage.startsWith("✅")) {
-        pushToLINEforGAS(resultMessage, userId); 
-        const analysisReport = generateSingleStockReport(ticker);
-        // ★ 同樣對首次分析的報告進行切分
-        const reportParts = analysisReport.split('---###---').map(part => part.trim()).filter(part => part.length > 0);
-        pushToLINEforGAS(reportParts, userId);
-    } else {
-        pushToLINEforGAS(resultMessage, userId);
-    }
-    return;
+      // ★ 同樣交給防彈級 push 函式處理
+      pushToLINEforGAS(resultMessage, userId); 
+
+      if (resultMessage.startsWith("✅")) {
+          const analysisReport = generateSingleStockReport(ticker);
+          const reportParts = analysisReport.split('---###---');
+          pushToLINEforGAS(reportParts, userId);
+      }
+      return;
   }
 
   // --- 指令 3: AI 財報季智能助理 ---
@@ -2055,8 +2121,7 @@ function handleTextMessage(message, replyToken, userId) {
   replyToLINE(replyToken, defaultReply);
 }
 
-
-//【AI 大腦】產生單一個股或 ETF 的深度分析報告 (v2.0 - 智慧升級版)
+//【最終修正版 v3.0】產生單一個股或 ETF 的深度分析報告
 function generateSingleStockReport(tickerOrName) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2068,12 +2133,10 @@ function generateSingleStockReport(tickerOrName) {
     const tickerCol = headers.indexOf('股票代碼');
     const nameCol = headers.indexOf('股票名稱');
     let stockDataRow = null;
-    let stockInfo = {};
-    let stockCode = "";
-    let name = "";
 
     for (let i = 1; i < data.length; i++) {
-      if (data[i][tickerCol] == tickerOrName || data[i][nameCol] == tickerOrName) {
+      // 為了安全比對，兩邊都轉換成字串
+      if (String(data[i][tickerCol]) == String(tickerOrName) || data[i][nameCol] == tickerOrName) {
         stockDataRow = data[i];
         break;
       }
@@ -2083,35 +2146,36 @@ function generateSingleStockReport(tickerOrName) {
       return `錯誤：在風控報表中找不到 "${tickerOrName}"，請先將其加入報表才能進行分析。`;
     }
 
-    stockCode = stockDataRow[tickerCol];
-    name = stockDataRow[nameCol];
+    // ★★★ 最終核心修正：在這裡進行強制類型轉換 ★★★
+    // 在讀取到股票代碼的第一時間，就立刻將它轉換為字串 (String)
+    const stockCode = String(stockDataRow[tickerCol]).trim();
+    const name = stockDataRow[nameCol];
     
-    // 將一整列的數據都打包給 AI
+    let stockInfo = {};
     headers.forEach((header, index) => {
-      if (header && stockDataRow[index]) { // 只打包有標題且有值的欄位
+      if (header && stockDataRow[index]) {
         stockInfo[header] = stockDataRow[index];
       }
     });
 
-    // ★★★ 智慧開關：判斷是 ETF 還是個股，並選擇對應的 prompt ★★★
+    // 因為 stockCode 現在保證是字串，所以 .startsWith() 絕對不會再出錯
     const isETF = stockCode.startsWith("00"); 
     let prompt = "";
 
     if (isETF) {
-      // --- 使用 ETF 專屬的宏觀分析 Prompt ---
       prompt = `
         你是一位專精於指數化投資 (ETF) 的資產配置顧問。
         你的分析核心是【順大勢，逆小勢】，旨在透過紀律的技術指標，在中長期的多頭趨勢中，找到風險報酬比較佳的分批佈局點。
         請為我分析 "${name} (${stockCode})" 這檔 ETF，並包含以下三點：
 
-        1.  **【當前趨勢定位】**:
+        1.  【當前趨勢定位】:
             * 從「均線排列」判斷，這檔 ETF 目前處於【長期多頭】、【長期空頭】還是【盤整】階段？這決定了我們當前的核心策略應該是偏多、偏空還是觀望。
 
-        2.  **【技術面買點評估 (分批佈局)】**:
+        2.  【技術面買點評估 (分批佈局)】:
             * **第一機會區 (月線)**: 目前的「今日股價」是否已經回檔至「MA20 (月線)」附近？這是否構成一個健康的、強勢整理後的首個佈局點？
             * **第二機會區 (季線)**: 目前的「今日股價」與「MA60 (季線)」的距離有多遠？季線是中長期趨勢的生命線，如果價格進一步回檔至此，是否會是一個更具安全邊際的加碼點？
 
-        3.  **【綜合策略建議 (紀律執行)】**:
+        3.  【綜合策略建議 (紀律執行)】:
             * 總結以上分析，明確建議「現在」應該採取的行動。例如：「目前為多頭排列下的首次回測月線，建議可開始第一批資金佈局」、「價格仍在月線之上，建議耐心等待回檔至 MA20 或 MA60 附近再行操作」、「已跌破季線，趨勢轉弱，建議保持觀望」。
             * **請務必提供明確的參考價位** (例如：MA20 約在 $XX.X 元，MA60 約在 $XX.X 元)。
             
@@ -2121,26 +2185,25 @@ function generateSingleStockReport(tickerOrName) {
         ---
       `;
     } else {
-      // --- 使用個股專屬的價值波段分析 Prompt (升級版) ---
       prompt = `
         你是一位專注於【中長期價值投資】與【波段操作】的基金經理人。
         你的分析需要結合個股基本面與技術面，提供一份專業、多維度的決策備忘錄。
         請為我深度分析 "${name} (${stockCode})" 這檔個股，你的報告需要包含以下四點：
 
-        1.  **【價值與成長性評估 (選股)】**:
-            * **價值面**: 從「歷史本益比位階」、「連續配息年數」與「殖利率」來看，目前估值是否具備安全邊際？
-            * **成長面**: 結合「營收YoY」、「EPS YoY」，判斷公司的中期成長動能是否強勁？
+        1.  【價值與成長性評估 (選股)】:
+            * 價值面: 從「歷史本益比位階」、「連續配息年數」與「殖利率」來看，目前估值是否具備安全邊際？
+            * 成長面: 結合「營收YoY」、「EPS YoY」，判斷公司的中期成長動能是否強勁？
 
-        2.  **【市場情緒與籌碼 (短期線索)】**:
+        2.  【市場情緒與籌碼 (短期線索)】:
             * 綜合「近期新聞情緒分數」以及「投信/外資連買天數」，判斷市場短期對它的情緒與主力籌碼的態度是偏多還是偏空？
 
-        3.  **【技術面操作點位 (擇時)】**:  <--- ★★★ 這裡是本次升級的重點 ★★★
-            * **趨勢判斷**: 從「均線排列」判斷其個股的長線趨勢。
-            * **機會點評估**: 目前的「今日股價」與「MA20 (月線)」及「MA60 (季線)」的相對位置如何？請判斷現在是處於【突破追價】的階段，還是【健康回檔至支撐】的佈局機會？**這是一個追高的位置，還是一個可以安心佈局的位置？**
+        3.  【技術面操作點位 (擇時)】:
+            * 趨勢判斷: 從「均線排列」判斷其個股的長線趨勢。
+            * 機會點評估: 目前的「今日股價」與「MA20 (月線)」及「MA60 (季線)」的相對位置如何？請判斷現在是處於【突破追價】的階段，還是【健康回檔至支撐】的佈局機會？這是一個追高的位置，還是一個可以安心佈局的位置？
 
-        4.  **【綜合策略建議 (決策)】**:
+        4.  【綜合策略建議 (決策)】:
             * 總結以上所有分析，給我一個明確的投資策略。
-            * 請說明你認為「現在」應該採取的行動（例如：開始分批買入、保持觀察等待回檔至 MA20、逢高減碼），並提供支持你結論的核心理由，**最好能結合明確的參考價位 (MA20/MA60)**。
+            * 請說明你認為「現在」應該採取的行動（例如：開始分批買入、保持觀察等待回檔至 MA20、逢高減碼），並提供支持你結論的核心理由，最好能結合明確的參考價位 (MA20/MA60)。
         
         ---
         [輸入資料]
@@ -2153,14 +2216,20 @@ function generateSingleStockReport(tickerOrName) {
     const perplexityApiKey = properties.getProperty('PERPLEXITY_API_KEY');
     if (!perplexityApiKey) return "錯誤：未設定 Perplexity API Key。";
     
-    // 呼叫 AI (我們將報告切分的功能移到 handleTextMessage 中)
     return callPerplexity_forGAS(prompt, perplexityApiKey);
 
   } catch (err) {
-    Logger.log(`generateSingleStockReport 發生錯誤: ${err}`);
-    return "抱歉，在產生報告時發生內部錯誤，請稍後再試。";
+    const detailedErrorReport = `🚨【偵錯報告：generateSingleStockReport】🚨\n\n` +
+                              `一個內部錯誤被成功捕獲，但日誌系統可能已失效。\n\n` +
+                              `錯誤類型: ${err.name}\n` +
+                              `錯誤訊息: ${err.message}\n` +
+                              `發生位置: \n${err.stack}`;
+    
+    return detailedErrorReport;
   }
 }
+
+
 
 //回傳訊息給 LINE (使用 Reply Token)
 function replyToLINE(replyToken, messageText) {
