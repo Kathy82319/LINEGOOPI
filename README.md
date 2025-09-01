@@ -3,7 +3,7 @@ const properties = PropertiesService.getScriptProperties();
 const FINMIND_API_TOKEN = properties.getProperty('FINMIND_API_TOKEN');
 
 
-// 當新增一檔股票時，呼叫此函式，即可依序跑完所有更新流程。
+//【單一股票初始化 v2.1 - 正式版】：當新增一檔股票時，呼叫此函式，即可依序跑完所有更新流程。
 function runCompleteUpdateForSingleStock(ticker) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName('風控報表');
@@ -37,7 +37,6 @@ function runCompleteUpdateForSingleStock(ticker) {
 
   Logger.log(`🚀 開始為 ${ticker} 執行完整的資料初始化流程...`);
 
-  // ★★★ 關鍵修正處：在這裡定義正確的 colMapping 物件 ★★★
   const colMappingForFinancials = {
     '營業收入': ['Revenue'], '營業毛利': ['GrossProfit'], '營業利益': ['OperatingIncome'],
     '稅後淨利': ['IncomeAfterTaxes', 'EquityAttributableToOwnersOfParent'], '營業費用': ['OperatingExpenses'],
@@ -48,16 +47,13 @@ function runCompleteUpdateForSingleStock(ticker) {
     '股東權益總額': ['Equity'], '資產總額': ['TotalAssets'], '負債總額': ['Liabilities']
   };
 
-  // --- 階段一：抓取基礎資料 ---
-  Logger.log("--> 階段 1/5: 抓取基礎財報與股本資料...");
+  // --- 階段 1-2: 抓取並填充基礎財報與股本資料 ---
+  Logger.log("--> 階段 1-2/5: 抓取並填充基礎財報與股本資料...");
   const stockInfo = fetchFinMindStockInfo(ticker);
   const dividendData = fetchAllBaseData_Definitive(ticker);
   const historicals = fetchHistoricalFinancials(ticker, 3);
-  // ★★★ 修正：傳入正確的 mapping 物件 ★★★
   const latestFinancials = fetchAndParseMultiSourceFinancials(ticker, colMappingForFinancials); 
 
-  // --- 階段二：填充表格 (基本資料 & 財報數據) ---
-  Logger.log("--> 階段 2/5: 填充基本面與財務數據...");
   if (stockInfo) {
     rowData[colMap['股票名稱']] = stockInfo.name;
     rowData[colMap['產業別']] = stockInfo.industry;
@@ -73,15 +69,10 @@ function runCompleteUpdateForSingleStock(ticker) {
   rowData[colMap['連續配息年數']] = calculateConsecutiveDividendYears_Definitive(ticker);
   if (latestFinancials && latestFinancials.latest) {
     const latest = latestFinancials.latest;
-    // 使用 mapping 來動態填充，避免寫死一堆欄位
     for (const key in latest) {
-        if (colMap[key] !== undefined) {
-            rowData[colMap[key]] = latest[key];
-        }
+        if (colMap[key] !== undefined) rowData[colMap[key]] = latest[key];
     }
-    if (latest['資產總額'] > 0) {
-      rowData[colMap['負債比']] = ((latest['負債總額'] / latest['資產總額']) * 100).toFixed(2) + '%';
-    }
+    if (latest['資產總額'] > 0) rowData[colMap['負債比']] = ((latest['負債總額'] / latest['資產總額']) * 100).toFixed(2) + '%';
   }
   if (latestFinancials && latestFinancials.latest && latestFinancials.lastYear) {
       const latest = latestFinancials.latest;
@@ -97,21 +88,22 @@ function runCompleteUpdateForSingleStock(ticker) {
     rowData[colMap['稅後淨利 (近四季)']] = lastFour.reduce((sum, q) => sum + (q.NetIncome || 0), 0);
   }
 
-  // --- 階段三：抓取即時市場數據 ---
+  // --- 階段 3: 抓取即時市場數據 ---
   Logger.log("--> 階段 3/5: 抓取即時市場數據...");
   let latestPriceData = null;
+  const targetDateStr = getLatestTradingDateStr();
   for (let j = 0; j < 5; j++) {
-      let tryDate = new Date();
+      let tryDate = new Date(targetDateStr);
       tryDate.setDate(tryDate.getDate() - j);
       const dateStr = Utilities.formatDate(tryDate, "Asia/Taipei", "yyyy-MM-dd");
       const result = fetchFinMindStockPrice(ticker, dateStr);
       if (result) { latestPriceData = result; break; }
   }
-  const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
-  const marginData = fetchFinMindMarginData(ticker);
+  const institutionalData = fetchFinMindInstitutionalInvestors(ticker, targetDateStr);
+  const marginData = fetchFinMindMarginData(ticker, targetDateStr);
   const techIndicators = fetchAndCalculateTechIndicators(ticker);
 
-  // --- 階段四：填充即時數據並完成所有衍生計算 ---
+  // --- 階段 4: 填充市場數據並完成所有衍生計算 ---
   Logger.log("--> 階段 4/5: 填充市場數據並完成衍生計算...");
   if (latestPriceData) {
     const price = latestPriceData.price;
@@ -121,47 +113,47 @@ function runCompleteUpdateForSingleStock(ticker) {
     const ttmEps = parseFloat(rowData[colMap['EPS (近四季)']]);
     const ttmRevenue = parseFloat(rowData[colMap['營業收入 (近四季)']]);
     const equity = parseFloat(rowData[colMap['股東權益總額']]);
-     if (shares > 0) {
+    if (shares > 0) {
         if (ttmRevenue) {
-            // ★ 修正：營收單位是千元，需乘以 1000
             const sps = (ttmRevenue * 1000) / shares;
             rowData[colMap['每股營收']] = sps.toFixed(2);
             if (sps > 0) rowData[colMap['股價營收比']] = (price / sps).toFixed(2);
         }
         if (equity) {
-            // ★ 修正：股東權益單位是千元，需乘以 1000
             const bvps = (equity * 1000) / shares;
             rowData[colMap['每股淨值']] = bvps.toFixed(2);
             if (bvps > 0) rowData[colMap['股價淨值比']] = (price / bvps).toFixed(2);
         }
     }
     if (ttmEps > 0) rowData[colMap['本益比']] = (price / ttmEps).toFixed(2);
-    const cashDividend = parseFloat(rowData[colMap['現金股利']]);
-    if (cashDividend > 0) {
-        const closePriceOnExDate = getPreviousDayClosePrice_Definitive(ticker, rowData[colMap['除息日']]);
-        if (closePriceOnExDate > 0) {
-            rowData[colMap['殖利率']] = ((cashDividend / closePriceOnExDate) * 100).toFixed(2) + '%';
-        }
-    }
-    if (ttmEps > 0 && cashDividend) rowData[colMap['股利發放率']] = ((cashDividend / ttmEps) * 100).toFixed(2) + '%';
   }
+
   if (institutionalData) {
     rowData[colMap['外資買超張數']] = institutionalData.foreign_buy_sell;
     rowData[colMap['投信買超張數']] = institutionalData.trust_buy_sell;
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
     let historySheet = ss.getSheetByName('法人歷史紀錄');
     if (historySheet) {
-      historySheet.appendRow([Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd"), ticker, institutionalData.foreign_buy_sell, institutionalData.trust_buy_sell]);
+      historySheet.appendRow([targetDateStr, ticker, institutionalData.foreign_buy_sell, institutionalData.trust_buy_sell]);
     }
   }
+
   if (marginData) {
-    rowData[colMap['融資餘額']] = marginData.margin_balance;
-    rowData[colMap['券賣餘額']] = marginData.short_balance;
+    const marginBalance = marginData.margin_balance;
+    const shortBalance = marginData.short_balance;
+    rowData[colMap['融資餘額']] = marginBalance;
+    rowData[colMap['券賣餘額']] = shortBalance;
+    if (colMap['券資比(%)'] !== undefined) {
+      rowData[colMap['券資比(%)']] = (marginBalance > 0) ? (shortBalance / marginBalance) : 0;
+    }
   }
+
   updateConsecutiveBuyDays_Single(rowData, headers, ticker);
+  
   if (techIndicators) {
     rowData[colMap['近10日均量']] = techIndicators.avgVolume10.toFixed(0);
     const { ma5, ma20, ma60, high60, todayClose, prevClose } = techIndicators;
+    if (colMap['MA20'] !== undefined) rowData[colMap['MA20']] = ma20 ? ma20.toFixed(2) : '資料不足';
+    if (colMap['MA60'] !== undefined) rowData[colMap['MA60']] = ma60 ? ma60.toFixed(2) : '資料不足';
     if (ma5 > ma20 && ma20 > ma60) rowData[colMap['均線排列']] = '多頭排列';
     else if (ma5 < ma20 && ma20 < ma60) rowData[colMap['均線排列']] = '空頭排列';
     else rowData[colMap['均線排列']] = '盤整';
@@ -169,7 +161,7 @@ function runCompleteUpdateForSingleStock(ticker) {
     rowData[colMap['是否跌破支撐']] = (prevClose >= ma60 && todayClose < ma60) ? '是' : '否';
   }
 
-  // --- 階段五：抓取並填充非結構化與歷史位階數據 ---
+  // --- 階段 5: 更新新聞情緒與歷史位階 ---
   Logger.log("--> 階段 5/5: 更新新聞情緒與歷史位階...");
   const newsHeadlines = fetchFinMindNews(ticker, 7);
   if (newsHeadlines && newsHeadlines.length > 0) {
@@ -177,7 +169,11 @@ function runCompleteUpdateForSingleStock(ticker) {
     if(stockInfo && stockInfo.name) {
       rowData[colMap['近期新聞情緒分數']] = analyzeSentimentWithAI(stockInfo.name, ticker, newsHeadlines);
     }
+  } else {
+    rowData[colMap['近七日新聞則數']] = 0;
+    rowData[colMap['近期新聞情緒分數']] = '無新聞';
   }
+
   const currentPE = parseFloat(rowData[colMap['本益比']]);
   if (!isNaN(currentPE)) {
       const historicalPEs = fetchHistoricalPER(ticker, 3);
@@ -188,7 +184,7 @@ function runCompleteUpdateForSingleStock(ticker) {
       }
   }
 
-  // --- 最終步驟：將更新後的整列數據一次性寫回工作表 ---
+  // --- 最終步驟: 將更新後的整列數據一次性寫回工作表 ---
   sheet.getRange(targetRowIndex + 1, 1, 1, rowData.length).setValues([rowData]);
   Logger.log(`✅ ${ticker} 的完整資料初始化流程執行完畢！`);
   return rowData;
@@ -1043,73 +1039,89 @@ function fetchHistoricalFinancials(ticker, years) {
   return parsedHistory;
 }
 
-//【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額
-//在每日更新市場數據後，會自動將最新的「外資」與「投信」買賣超數據，寫入到名為「法人歷史紀錄」的新工作表中。
+//【籌碼面指標】：外資買超、投信買超、融資餘額、券賣餘額、券資比
 function updateMarketData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reportSheet = ss.getSheetByName('風控報表');
-  if (!reportSheet) {
-    Logger.log('❌ 找不到名為 "風控報表" 的工作表');
-    return;
-  }
+  if (!reportSheet) { /* ... 錯誤處理 ... */ return; }
 
-  // 步驟 1: 確保「法人歷史紀錄」工作表存在
   let historySheet = ss.getSheetByName('法人歷史紀錄');
   if (!historySheet) {
     historySheet = ss.insertSheet('法人歷史紀錄');
-    historySheet.appendRow(['日期', '股票代碼', '外資買超張數', '投信買超張數']);
-    Logger.log("✅ 已建立新的工作表: 法人歷史紀錄");
+    historySheet.appendRow(['日期', '股票代碼', '外資買賣超(張)', '投信買賣超(張)']);
   }
+
+  const targetDateStr = getLatestTradingDateStr();
+  Logger.log(`目標資料日期: ${targetDateStr}`);
+
+  const historyData = historySheet.getDataRange().getValues();
+  const existingRecords = new Set(historyData.slice(1).map(row => `${Utilities.formatDate(new Date(row[0]), "Asia/Taipei", "yyyy-MM-dd")}_${row[1]}`));
   
   const reportData = reportSheet.getDataRange().getValues();
   const headers = reportData[0];
+  const colMap = headers.reduce((map, header, index) => { map[header] = index; return map; }, {});
   
-  // --- 找到所有需要更新的籌碼欄位索引 ---
-  const tickerCol = headers.indexOf('股票代碼');
-  const foreignBuyCol = headers.indexOf('外資買超張數');
-  const trustBuyCol = headers.indexOf('投信買超張數');
-  const marginBalanceCol = headers.indexOf('融資餘額');
-  const shortBalanceCol = headers.indexOf('券賣餘額');
-  
-  const todayStr = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
+  const shortMarginRatioCol = colMap['券資比(%)'];
+  const newHistoryRows = [];
 
-  // --- 主迴圈：逐一處理每一支股票 ---
   for (let i = 1; i < reportData.length; i++) {
-    const ticker = reportData[i][tickerCol] ? String(reportData[i][tickerCol]).trim() : null;
+    const ticker = reportData[i][colMap['股票代碼']] ? String(reportData[i][colMap['股票代碼']]).trim() : null;
     if (!ticker) continue;
 
-    // --- 模組 A: 獲取三大法人買賣超 ---
-    const institutionalData = fetchFinMindInstitutionalInvestors(ticker);
+    const institutionalData = fetchFinMindInstitutionalInvestors(ticker, targetDateStr);
     if (institutionalData) {
-      const foreignBuySell = institutionalData.foreign_buy_sell;
-      const trustBuySell = institutionalData.trust_buy_sell;
-
-      // 更新「風控報表」上的今日數據
-      if (foreignBuyCol !== -1) reportData[i][foreignBuyCol] = foreignBuySell;
-      if (trustBuyCol !== -1) reportData[i][trustBuyCol] = trustBuySell;
-      
-      // 將今日數據寫入「法人歷史紀錄」工作表 (為計算連買天數使用)
-      historySheet.appendRow([todayStr, ticker, foreignBuySell, trustBuySell]);
-
-    } else {
-      Logger.log(`-> ${ticker}: 找不到「三大法人」資料。`);
+      reportData[i][colMap['外資買超張數']] = institutionalData.foreign_buy_sell;
+      reportData[i][colMap['投信買超張數']] = institutionalData.trust_buy_sell;
+      const recordKey = `${targetDateStr}_${ticker}`;
+      if (!existingRecords.has(recordKey)) {
+        newHistoryRows.push([targetDateStr, ticker, institutionalData.foreign_buy_sell, institutionalData.trust_buy_sell]);
+        existingRecords.add(recordKey);
+      }
     }
 
-    //模組 B: 獲取融資融券餘額 
-    const marginData = fetchFinMindMarginData(ticker);
+    const marginData = fetchFinMindMarginData(ticker, targetDateStr);
     if (marginData) {
-      if (marginBalanceCol !== -1) reportData[i][marginBalanceCol] = marginData.margin_balance;
-      if (shortBalanceCol !== -1) reportData[i][shortBalanceCol] = marginData.short_balance;
-    } else {
-      Logger.log(`-> ${ticker}: 找不到「融資融券餘額」資料。`);
+      const marginBalance = marginData.margin_balance;
+      const shortBalance = marginData.short_balance;
+      reportData[i][colMap['融資餘額']] = marginBalance;
+      reportData[i][colMap['券賣餘額']] = shortBalance;
+
+      // ★★★ 核心修正：不再乘以 100，只計算原始比率 ★★★
+      if (shortMarginRatioCol !== -1 && marginBalance > 0) {
+        // 只計算原始的小數比率，例如 0.0851
+        const ratio = shortBalance / marginBalance; 
+        // 將這個原始比率直接寫入儲存格
+        reportData[i][shortMarginRatioCol] = ratio; 
+      } else if (shortMarginRatioCol !== -1) {
+        reportData[i][shortMarginRatioCol] = 0;
+      }
     }
   }
 
-  // 將所有更新一次性寫回 Google Sheet
   reportSheet.getDataRange().setValues(reportData);
-  Logger.log(`✅ 市場籌碼數據更新完成，並已同步寫入歷史紀錄。`);
+  if (newHistoryRows.length > 0) {
+    historySheet.getRange(historySheet.getLastRow() + 1, 1, newHistoryRows.length, 4).setValues(newHistoryRows);
+  }
+  Logger.log(`✅ 市場籌碼數據更新完成！`);
 }
-
+//【輔助函式】：取得最新的有效交易日字串 (會自動跳過週末)
+function getLatestTradingDateStr() {
+    let date = new Date();
+    // 如果是凌晨0點到早上8點之間執行，我們假設它要抓的是前一天的資料
+    if (date.getHours() < 8) {
+        date.setDate(date.getDate() - 1);
+    }
+    
+    // 迴圈檢查，直到找到一個非週末日
+    for (let i = 0; i < 7; i++) { 
+        const dayOfWeek = date.getDay();
+        if (dayOfWeek !== 0 && dayOfWeek !== 6) { // 0=週日, 6=週六
+            return Utilities.formatDate(date, "Asia/Taipei", "yyyy-MM-dd");
+        }
+        date.setDate(date.getDate() - 1); // 如果是週末，就往前推一天
+    }
+    return Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd"); // 備用，以防萬一
+}
 
 //【融資融券輔助函式】
 function fetchFinMindMarginData(ticker) {
@@ -1751,8 +1763,9 @@ function fetchNewsForStock_forGAS(ticker, name) {
 //★★★ 模組一：動態條件警報系統的核心 ★★★
 // 在每日數據更新後執行，檢查所有股票是否觸發使用者自訂的警報條件。
 // =======================================================================
+//【智慧大腦 v5.0】：雙引擎警報系統 (彙總報告版)
 function checkCustomAlerts() {
-  Logger.log("--> 步驟：開始執行「動態條件警報」檢查...");
+  Logger.log("--> 步驟：開始執行「雙引擎彙總報告」警報檢查...");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName('風控報表');
   if (!sheet) {
@@ -1764,51 +1777,78 @@ function checkCustomAlerts() {
   const headers = data[0];
   const tickerCol = headers.indexOf('股票代碼');
   const nameCol = headers.indexOf('股票名稱');
-  const conditionCol = headers.indexOf('警報條件');
-
-  if (conditionCol === -1) {
-    Logger.log('❌ 在工作表中找不到 "警報條件" 欄位，警報系統無法運作。');
-    return;
-  }
   
+  const strategyCols = headers.map((header, index) => {
+    if (header.startsWith("策略：")) return { name: header, index: index };
+    return null;
+  }).filter(col => col !== null);
+
+  const conditionCol = headers.indexOf('警報條件');
+  
+  // ★★★ 核心改造：建立一個「警報彙總清單」 ★★★
+  let finalAlerts = [];
+
   // 逐一檢查每一支股票
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    const userConditions = row[conditionCol];
+    const ticker = row[tickerCol];
+    const name = row[nameCol];
+    if (!ticker) continue;
     
-    // 如果條件欄位是空白的，就直接跳過
-    if (!userConditions) {
-      continue;
-    }
-    
-    // 呼叫我們的解析器來判斷條件是否滿足
-    const result = parseAndCheckConditions(userConditions, headers, row);
-    
-    // 如果所有條件都滿足...
-    if (result.isMet) {
-      Logger.log(`✅ 觸發警報！股票: ${row[nameCol]}, 條件: ${userConditions}`);
-      
-      const ticker = row[tickerCol];
-      const name = row[nameCol];
-      
-      // 組合一則清晰的 LINE 通知訊息
-      let message = `🔔【動態條件警報】\n`;
-      message += `股票: ${ticker} ${name}\n\n`;
-      message += `已觸發您設定的條件：\n`;
-      message += `\"${userConditions}\"\n\n`;
-      message += `詳細觸發數據：\n${result.details}`;
-      
-      // 發送到 LINE
-      const properties = PropertiesService.getScriptProperties();
-      const lineChannelToken = properties.getProperty('LINE_CHANNEL_TOKEN');
-      const lineUserId = properties.getProperty('LINE_USER_ID');
-      if (lineChannelToken && lineUserId) {
-        pushToLINEforGAS(message, lineChannelToken, lineUserId);
+    let triggeredMessages = [];
+
+    // --- 引擎一：檢查儀表板 ---
+    if (strategyCols.length > 0) {
+      for (const strategy of strategyCols) {
+        const signal = row[strategy.index];
+        if (signal && String(signal).trim() !== "") {
+          triggeredMessages.push(`• ${strategy.name}: ${signal}`);
+        }
       }
     }
+
+    // --- 引擎二：檢查條件字串 ---
+    if (conditionCol !== -1) {
+      const userConditions = row[conditionCol];
+      if (userConditions) {
+        const result = parseAndCheckConditions(userConditions, headers, row); 
+        if (result.isMet) {
+          triggeredMessages.push(`• 警報條件觸發: "${userConditions}"`);
+        }
+      }
+    }
+    
+    // 如果這支股票有任何觸發，就將其彙總成一段文字，加入最終清單
+    if (triggeredMessages.length > 0) {
+      const stockAlertBlock = `\n--- ${ticker} ${name} ---\n` + triggeredMessages.join('\n');
+      finalAlerts.push(stockAlertBlock);
+    }
   }
-  Logger.log("✅ 「動態條件警報」檢查完畢！");
+
+  // ★★★ 最終步驟：檢查彙總清單，如果非空，就只發送一次通知 ★★★
+  if (finalAlerts.length > 0) {
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
+    let finalMessage = `🔔【${todayStr} 盤後警報報告】\n`;
+    finalMessage += `總共有 ${finalAlerts.length} 支股票觸發監控條件：`;
+    finalMessage += finalAlerts.join('');
+
+    Logger.log(`✅ 警報彙總完成，準備發送...`);
+    Logger.log(finalMessage);
+    
+    // 發送到 LINE
+    const properties = PropertiesService.getScriptProperties();
+    const lineChannelToken = properties.getProperty('LINE_CHANNEL_TOKEN');
+    const lineUserId = properties.getProperty('LINE_USER_ID');
+    if (lineChannelToken && lineUserId) {
+       pushToLINEforGAS(finalMessage, lineChannelToken, lineUserId);
+    }
+  } else {
+    Logger.log("✅ 所有監控目標均未觸發警報。");
+  }
+  
+  Logger.log("✅ 「雙引擎彙總報告」警報檢查完畢！");
 }
+
 
 //智慧大腦：條件解析器
 //【智慧大腦 v2.0】：條件解析器 (支援括號與 AND/OR 邏輯)
